@@ -1,0 +1,10 @@
+{
+  "id": "worklog",
+  "name": "Worklog",
+  "version": "0.1.0",
+  "minAppVersion": "1.5.0",
+  "description": "Monthly worklog tracker with tasks, time entries, calendar, and local JSON storage.",
+  "author": "Yue Zenglei",
+  "authorUrl": "",
+  "isDesktopOnly": false
+}
