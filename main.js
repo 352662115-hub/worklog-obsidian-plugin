@@ -6,7 +6,6 @@ const CONFIG_FILE_NAME = 'config.json';
 const DEFAULT_SETTINGS = {
   worklogFolder: 'worklog',
   dataFolder: '.obsidian/plugins/worklog/data',
-  templateFolder: '99-模板',
   createMonthlyNote: false,
   taskTypes: [],
   defaultTaskTemplates: []
@@ -158,7 +157,13 @@ function normalizeTaskTemplates(templates, taskTypes = []) {
 function normalizeSettings(settings) {
   const taskTypes = normalizeTaskTypes(settings.taskTypes);
   const defaultTaskTemplates = normalizeTaskTemplates(settings.defaultTaskTemplates, taskTypes);
-  return Object.assign({}, DEFAULT_SETTINGS, settings, { taskTypes, defaultTaskTemplates });
+  return {
+    worklogFolder: clean(settings.worklogFolder) || DEFAULT_SETTINGS.worklogFolder,
+    dataFolder: clean(settings.dataFolder) || DEFAULT_SETTINGS.dataFolder,
+    createMonthlyNote: settings.createMonthlyNote === true,
+    taskTypes,
+    defaultTaskTemplates
+  };
 }
 
 function categoryColor(id, index = 0) {
@@ -278,7 +283,6 @@ function defaultData(month, settings = DEFAULT_SETTINGS) {
     schemaVersion: 2,
     month,
     categories: clone(taskTypes),
-    statuses: clone(STATUSES),
     tasks,
     logs: [],
     dailyStatus: { completedDates: [] },
@@ -293,7 +297,7 @@ function normalizeData(raw, month, settings = DEFAULT_SETTINGS) {
   data.month = clean(data.month) || month;
   const taskTypes = normalizeTaskTypes(settings.taskTypes);
   data.categories = categoriesForData(data, taskTypes);
-  data.statuses = clone(STATUSES);
+  delete data.statuses;
   data.tasks = (data.tasks || []).map((task) => ({
     id: clean(task.id),
     name: clean(task.name),
@@ -588,16 +592,15 @@ class WorklogPlugin extends Plugin {
   async handleDataFileModify(file) {
     const month = this.monthFromDataPath(file.path || '');
     if (!month) return;
-    if (this.skipNextModifyPath === file.path) {
-      this.skipNextModifyPath = '';
-      this.refreshYearDashboards();
-      return;
-    }
+    this.refreshMonthViews(month);
+    this.refreshYearDashboards();
+  }
+
+  refreshMonthViews(month) {
     this.app.workspace.getLeavesOfType(VIEW_TYPE).forEach((leaf) => {
       const view = leaf.view;
       if (view && view.month === month && typeof view.load === 'function') view.load();
     });
-    this.refreshYearDashboards();
   }
 
   refreshYearDashboards() {
@@ -628,52 +631,67 @@ class WorklogPlugin extends Plugin {
     }
   }
 
+  async ensureAdapterFolder(folder) {
+    const parts = clean(folder).split('/').filter(Boolean);
+    let current = '';
+    for (const part of parts) {
+      current = current ? `${current}/${part}` : part;
+      if (!(await this.app.vault.adapter.exists(current))) await this.app.vault.adapter.mkdir(current);
+    }
+  }
+
   async readData(month) {
-    await this.ensureFolder(this.settings.dataFolder);
+    await this.ensureAdapterFolder(this.settings.dataFolder);
     const path = this.dataPath(month);
-    let file = this.app.vault.getAbstractFileByPath(path);
-    if (!file) {
+    if (!(await this.app.vault.adapter.exists(path))) {
       const data = defaultData(month, this.settings);
-      await this.app.vault.create(path, JSON.stringify(data, null, 2));
+      await this.app.vault.adapter.write(path, JSON.stringify(data, null, 2));
       return data;
     }
-    const data = normalizeData(JSON.parse(await this.app.vault.read(file)), month, this.settings);
-    return data;
+    try {
+      return normalizeData(JSON.parse(await this.app.vault.adapter.read(path)), month, this.settings);
+    } catch (error) {
+      console.error(`Worklog: failed to read ${path}`, error);
+      new Notice(`工时数据读取失败，请检查 ${path}`);
+      return normalizeData({}, month, this.settings);
+    }
   }
 
-  dataFiles() {
+  async dataFiles() {
     const prefix = `${this.settings.dataFolder}/`;
-    return this.app.vault.getFiles()
-      .filter((file) => file.path.startsWith(prefix) && file.path.endsWith('.json') && isValidMonth(file.path.slice(prefix.length, -5)))
-      .sort((a, b) => a.path.localeCompare(b.path));
+    if (!(await this.app.vault.adapter.exists(this.settings.dataFolder))) return [];
+    const listed = await this.app.vault.adapter.list(this.settings.dataFolder);
+    return listed.files
+      .filter((path) => path.startsWith(prefix) && path.endsWith('.json') && isValidMonth(path.slice(prefix.length, -5)))
+      .sort((a, b) => a.localeCompare(b));
   }
 
-  async readExistingData(file) {
-    const month = this.monthFromDataPath(file.path || '');
+  async readExistingData(path) {
+    const month = this.monthFromDataPath(path || '');
     if (!isValidMonth(month)) return null;
     try {
-      return normalizeData(JSON.parse(await this.app.vault.read(file)), month, this.settings);
+      return normalizeData(JSON.parse(await this.app.vault.adapter.read(path)), month, this.settings);
     } catch (error) {
-      console.error(`Worklog: failed to read ${file.path}`, error);
+      console.error(`Worklog: failed to read ${path}`, error);
       return null;
     }
   }
 
   async readAllExistingData() {
-    const items = await Promise.all(this.dataFiles().map((file) => this.readExistingData(file)));
+    const files = await this.dataFiles();
+    const items = await Promise.all(files.map((file) => this.readExistingData(file)));
     return items.filter(Boolean);
   }
 
   async writeData(data) {
-    await this.ensureFolder(this.settings.dataFolder);
+    await this.ensureAdapterFolder(this.settings.dataFolder);
     const month = data.month || currentMonth();
     const path = this.dataPath(month);
     const next = Object.assign({}, data, { updatedAt: new Date().toISOString() });
-    const file = this.app.vault.getAbstractFileByPath(path);
-    this.skipNextModifyPath = path;
-    if (file) await this.app.vault.modify(file, JSON.stringify(next, null, 2));
-    else await this.app.vault.create(path, JSON.stringify(next, null, 2));
+    await this.app.vault.adapter.write(path, JSON.stringify(next, null, 2));
     await this.maybeSyncMonthNote(next);
+    this.refreshMonthViews(month);
+    this.refreshYearDashboards();
     return next;
   }
 
