@@ -1,4 +1,4 @@
-const { Plugin, ItemView, Notice, Modal, Setting, PluginSettingTab } = require('obsidian');
+const { Plugin, ItemView, Notice, Modal, Setting, PluginSettingTab, setIcon } = require('obsidian');
 
 const VIEW_TYPE = 'worklog-view';
 const YEAR_VIEW_TYPE = 'worklog-year-view';
@@ -70,6 +70,16 @@ function currentMonth() {
   return todayIso().slice(0, 7);
 }
 
+function currentYear() {
+  return todayIso().slice(0, 4);
+}
+
+function formatMonthTitle(month) {
+  const match = clean(month).match(/^(20\d{2})-(\d{2})$/);
+  if (!match) return clean(month);
+  return `${match[1]} 年 ${Number(match[2])} 月`;
+}
+
 function isValidMonth(value) {
   const match = clean(value).match(/^(20\d{2})-(\d{2})$/);
   return !!match && Number(match[2]) >= 1 && Number(match[2]) <= 12;
@@ -80,6 +90,20 @@ function normalizeMonth(year, month) {
   const m = Number(clean(month));
   if (!Number.isInteger(y) || y < 2000 || y > 2099 || !Number.isInteger(m) || m < 1 || m > 12) return '';
   return `${y}-${pad2(m)}`;
+}
+
+function normalizeYear(value) {
+  const year = Number(clean(value));
+  if (!Number.isInteger(year) || year < 2000 || year > 2099) return '';
+  return String(year);
+}
+
+function monthOptions() {
+  return Array.from({ length: 12 }, (_, index) => pad2(index + 1));
+}
+
+function escapeRegExp(value) {
+  return clean(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function toNumber(value) {
@@ -351,6 +375,7 @@ function deriveWorklogData(data) {
   const actualByTask = new Map();
   const daily = new Map();
   const dailyCount = new Map();
+  const logCountByTask = new Map();
   const categories = categoriesForData(data, data.categories);
   const taskCategoryIds = new Set(data.tasks.map((task) => clean(task.category)).filter(Boolean));
   const taskCategories = categories.filter((category) => taskCategoryIds.has(category.id));
@@ -361,10 +386,38 @@ function deriveWorklogData(data) {
     actualByTask.set(log.taskId, (actualByTask.get(log.taskId) || 0) + hours);
     daily.set(log.date, (daily.get(log.date) || 0) + hours);
     dailyCount.set(log.date, (dailyCount.get(log.date) || 0) + 1);
+    logCountByTask.set(log.taskId, (logCountByTask.get(log.taskId) || 0) + 1);
   });
   const totalPlanned = data.tasks.reduce((sum, task) => sum + toNumber(task.plannedHours), 0);
   const totalActual = data.logs.reduce((sum, log) => sum + toNumber(log.hours), 0);
-  return { tasksById, actualByTask, daily, dailyCount, categories, taskCategories, categoryById, totalPlanned, totalActual };
+  return {
+    tasksById,
+    actualByTask,
+    daily,
+    dailyCount,
+    logCountByTask,
+    categories,
+    taskCategories,
+    categoryById,
+    totalPlanned,
+    totalActual
+  };
+}
+
+function completionPercent(planned, actual) {
+  const p = toNumber(planned);
+  const a = toNumber(actual);
+  if (p <= 0) return a > 0 ? 100 : 0;
+  return Math.min(999, Math.round((a / p) * 100));
+}
+
+function addModalTitleBadge(modalEl, text) {
+  const title = modalEl && modalEl.querySelector ? modalEl.querySelector('.modal-title') : null;
+  if (!title || !text) return;
+  title.appendChild(Object.assign(document.createElement('span'), {
+    className: 'worklog-modal-title-badge',
+    textContent: text
+  }));
 }
 
 function taskTypeRowsForData(data, d = deriveWorklogData(data)) {
@@ -538,6 +591,156 @@ function buildMonthNoteContent(data, dataPath) {
   return `---\ntype: worklog-month\nmonth: ${data.month}\nsystem: Worklog Plugin\ndata: ${dataPath}\nupdated: ${updatedAt}\n---\n\n# ${data.month} 工时工作台\n\n> 本笔记由 Worklog 插件根据本地 JSON 自动生成，工时工作台中的看板、日历、任务和明细会同步到这里。\n\n## 月度数据看板\n\n${markdownTable(['指标', '数值'], statsRows)}\n## 分类工时\n\n${markdownTable(['类型', '计划工时', '实际工时', '差异'], categoryRows, '暂无任务数据。')}\n## 日历\n\n${markdownTable(['一', '二', '三', '四', '五', '六', '日'], calendarRows, '暂无日历数据。')}\n## 任务清单\n\n${markdownTable(['任务 ID', '任务', '类型', 'issue', '计划', '实际', '状态'], taskRows, '暂无任务数据。')}\n## 每日工时明细\n\n${markdownTable(['日期', '任务 ID', '任务', '工时', '做了什么', 'issue'], logRows, '暂无工时记录。')}\n`;
 }
 
+class WorklogMonthPickerModal extends Modal {
+  constructor(app, plugin, options = {}) {
+    super(app);
+    this.plugin = plugin;
+    this.title = options.title || '选择月份';
+    this.actionText = options.actionText || '确定';
+    this.monthDesc = options.monthDesc || '选择月份';
+    this.months = Array.from(new Set((options.months || []).filter(isValidMonth))).sort((a, b) => b.localeCompare(a));
+    this.year = normalizeYear(options.year) || (this.months[0] ? this.months[0].slice(0, 4) : currentYear());
+    this.month = clean(options.month) || (this.months[0] ? this.months[0].slice(5, 7) : currentMonth().slice(5, 7));
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+    this.modalEl.addClass('worklog-modal');
+    this.setTitle(this.title);
+    contentEl.empty();
+    new Setting(contentEl)
+      .setName('年份')
+      .setDesc('请输入 4 位年份，例如 2026')
+      .addText((text) => text
+        .setValue(this.year)
+        .setPlaceholder('例如 2026')
+        .onChange((value) => {
+          this.year = clean(value);
+          this.refreshMonthOptions(monthSelect);
+        }));
+
+    const monthSetting = new Setting(contentEl).setName('月份').setDesc(this.monthDesc);
+    const monthSelect = document.createElement('select');
+    monthSelect.addEventListener('change', () => { this.month = monthSelect.value; });
+    monthSetting.controlEl.appendChild(monthSelect);
+    this.refreshMonthOptions(monthSelect);
+
+    new Setting(contentEl).addButton((button) => button
+      .setButtonText(this.actionText)
+      .setCta()
+      .onClick(async () => {
+        const month = normalizeMonth(this.year, this.month);
+        if (!month) {
+          new Notice('请选择有效的年月');
+          return;
+        }
+        await this.onConfirm(month);
+      }));
+  }
+
+  refreshMonthOptions(select) {
+    select.empty();
+    monthOptions().forEach((value) => {
+      select.appendChild(new Option(this.monthLabel(value), value));
+    });
+    if (!monthOptions().includes(this.month)) this.month = currentMonth().slice(5, 7);
+    select.value = this.month;
+  }
+
+  monthLabel(value) {
+    return `${Number(value)} 月`;
+  }
+
+  async onConfirm() {}
+}
+
+class CreateWorklogMonthModal extends WorklogMonthPickerModal {
+  constructor(app, plugin) {
+    super(app, plugin, {
+      title: '创建工时工作台',
+      actionText: '创建',
+      year: currentYear(),
+      month: currentMonth().slice(5, 7),
+      monthDesc: '选择要创建的月份'
+    });
+  }
+
+  async onConfirm(month) {
+    this.close();
+    await this.plugin.createMonthDashboard(month);
+  }
+}
+
+class JumpWorklogMonthModal extends WorklogMonthPickerModal {
+  constructor(app, plugin, months) {
+    const sortedMonths = Array.from(new Set((months || []).filter(isValidMonth))).sort((a, b) => b.localeCompare(a));
+    super(app, plugin, {
+      title: '跳转到月份工时工作台',
+      actionText: '打开',
+      months: sortedMonths,
+      year: sortedMonths[0] ? sortedMonths[0].slice(0, 4) : currentYear(),
+      month: sortedMonths[0] ? sortedMonths[0].slice(5, 7) : currentMonth().slice(5, 7),
+      monthDesc: '已有数据会直接打开，无数据会询问是否创建'
+    });
+  }
+
+  monthLabel(value) {
+    const targetMonth = normalizeMonth(this.year, value);
+    const suffix = this.months.includes(targetMonth) ? '已有数据' : '无数据';
+    return `${Number(value)} 月（${suffix}）`;
+  }
+
+  async onConfirm(month) {
+    if (this.months.includes(month)) {
+      this.close();
+      await this.plugin.openView(month);
+      return;
+    }
+    if (!confirm(`该月份还没有数据，是否创建 ${month} 的工时工作台？`)) return;
+    this.close();
+    await this.plugin.createMonthDashboard(month);
+  }
+}
+
+class JumpWorklogYearModal extends Modal {
+  constructor(app, plugin, years) {
+    super(app);
+    this.plugin = plugin;
+    this.existingYears = Array.from(new Set((years || []).map(normalizeYear).filter(Boolean))).sort((a, b) => b.localeCompare(a));
+    this.year = this.existingYears[0] || currentYear();
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+    this.modalEl.addClass('worklog-modal');
+    this.setTitle('跳转到年度工时看板');
+    contentEl.empty();
+    new Setting(contentEl)
+      .setName('年份')
+      .setDesc('请输入 4 位年份，例如 2026')
+      .addText((text) => text
+        .setValue(this.year)
+        .setPlaceholder('例如 2026')
+        .onChange((value) => { this.year = clean(value); }));
+    new Setting(contentEl).addButton((button) => button
+      .setButtonText('打开')
+      .setCta()
+      .onClick(async () => {
+        const year = normalizeYear(this.year);
+        if (!year) {
+          new Notice('请选择有效年份');
+          return;
+        }
+        if (!(await this.plugin.hasYearData(year))) {
+          new Notice(`${year} 年暂无工时数据`);
+          return;
+        }
+        this.close();
+        await this.plugin.openYearDashboard(year);
+      }));
+  }
+}
+
 class WorklogPlugin extends Plugin {
   async onload() {
     this.settings = await this.loadSettings();
@@ -547,7 +750,9 @@ class WorklogPlugin extends Plugin {
     this.registerEvent(this.app.vault.on('modify', (file) => this.handleDataFileModify(file)));
     this.addRibbonIcon('calendar-clock', '打开工时工作台', () => this.openView(currentMonth()));
     this.addCommand({ id: 'open-worklog', name: '打开工时工作台', callback: () => this.openView(currentMonth()) });
-    this.addCommand({ id: 'open-worklog-month', name: '选择年月打开工时工作台', callback: () => new MonthPickerModal(this.app, this, currentMonth()).open() });
+    this.addCommand({ id: 'create-worklog-month-dashboard', name: '创建工时工作台', callback: () => new CreateWorklogMonthModal(this.app, this).open() });
+    this.addCommand({ id: 'jump-worklog-month', name: '跳转到月份工时工作台', callback: async () => new JumpWorklogMonthModal(this.app, this, await this.dataMonths()).open() });
+    this.addCommand({ id: 'jump-worklog-year', name: '跳转到年度工时看板', callback: async () => new JumpWorklogYearModal(this.app, this, await this.availableYears()).open() });
     this.addCommand({ id: 'open-worklog-year-dashboard', name: '打开年度工时看板', callback: () => this.openYearDashboard() });
     this.addSettingTab(new WorklogSettingTab(this.app, this));
   }
@@ -580,13 +785,30 @@ class WorklogPlugin extends Plugin {
   }
 
   dataPath(month) {
-    return `${this.settings.dataFolder}/${month}.json`;
+    const targetMonth = isValidMonth(month) ? month : currentMonth();
+    return `${this.settings.dataFolder}/${targetMonth.slice(0, 4)}/${targetMonth}.json`;
+  }
+
+  legacyDataPath(month) {
+    const targetMonth = isValidMonth(month) ? month : currentMonth();
+    return `${this.settings.dataFolder}/${targetMonth}.json`;
+  }
+
+  monthDataFolder(month) {
+    const targetMonth = isValidMonth(month) ? month : currentMonth();
+    return `${this.settings.dataFolder}/${targetMonth.slice(0, 4)}`;
   }
 
   monthFromDataPath(path) {
-    const prefix = `${this.settings.dataFolder}/`;
-    if (!path.startsWith(prefix) || !path.endsWith('.json')) return '';
-    return path.slice(prefix.length, -5);
+    const prefix = escapeRegExp(clean(this.settings.dataFolder));
+    const match = clean(path).match(new RegExp(`^${prefix}/(?:(20\\d{2})/)?(20\\d{2}-\\d{2})\\.json$`));
+    if (!match) return '';
+    return match[2];
+  }
+
+  isLegacyDataPath(path) {
+    const prefix = escapeRegExp(clean(this.settings.dataFolder));
+    return new RegExp(`^${prefix}/20\\d{2}-\\d{2}\\.json$`).test(clean(path));
   }
 
   async handleDataFileModify(file) {
@@ -641,29 +863,61 @@ class WorklogPlugin extends Plugin {
   }
 
   async readData(month) {
-    await this.ensureAdapterFolder(this.settings.dataFolder);
-    const path = this.dataPath(month);
-    if (!(await this.app.vault.adapter.exists(path))) {
-      const data = defaultData(month, this.settings);
-      await this.app.vault.adapter.write(path, JSON.stringify(data, null, 2));
-      return data;
+    const targetMonth = isValidMonth(month) ? month : currentMonth();
+    await this.ensureAdapterFolder(this.monthDataFolder(targetMonth));
+    const path = this.dataPath(targetMonth);
+    const legacyPath = this.legacyDataPath(targetMonth);
+    if (await this.app.vault.adapter.exists(path)) {
+      try {
+        return normalizeData(JSON.parse(await this.app.vault.adapter.read(path)), targetMonth, this.settings);
+      } catch (error) {
+        console.error(`Worklog: failed to read ${path}`, error);
+        new Notice(`工时数据读取失败，请检查 ${path}`);
+        return normalizeData({}, targetMonth, this.settings);
+      }
     }
-    try {
-      return normalizeData(JSON.parse(await this.app.vault.adapter.read(path)), month, this.settings);
-    } catch (error) {
-      console.error(`Worklog: failed to read ${path}`, error);
-      new Notice(`工时数据读取失败，请检查 ${path}`);
-      return normalizeData({}, month, this.settings);
+    if (await this.app.vault.adapter.exists(legacyPath)) {
+      try {
+        const data = normalizeData(JSON.parse(await this.app.vault.adapter.read(legacyPath)), targetMonth, this.settings);
+        await this.app.vault.adapter.write(path, JSON.stringify(data, null, 2));
+        await this.removeLegacyDataFile(legacyPath);
+        return data;
+      } catch (error) {
+        console.error(`Worklog: failed to migrate ${legacyPath}`, error);
+      }
     }
+    const data = defaultData(targetMonth, this.settings);
+    await this.app.vault.adapter.write(path, JSON.stringify(data, null, 2));
+    return data;
   }
 
   async dataFiles() {
-    const prefix = `${this.settings.dataFolder}/`;
-    if (!(await this.app.vault.adapter.exists(this.settings.dataFolder))) return [];
-    const listed = await this.app.vault.adapter.list(this.settings.dataFolder);
-    return listed.files
-      .filter((path) => path.startsWith(prefix) && path.endsWith('.json') && isValidMonth(path.slice(prefix.length, -5)))
-      .sort((a, b) => a.localeCompare(b));
+    const files = await this.adapterFiles(this.settings.dataFolder);
+    const byMonth = new Map();
+    files.forEach((path) => {
+      const month = this.monthFromDataPath(path);
+      if (!month) return;
+      const existing = byMonth.get(month);
+      if (!existing || (this.isLegacyDataPath(existing) && !this.isLegacyDataPath(path))) {
+        byMonth.set(month, path);
+      }
+    });
+    return Array.from(byMonth.values()).sort((a, b) => a.localeCompare(b));
+  }
+
+  async adapterFiles(folder) {
+    const root = clean(folder);
+    if (!root || !(await this.app.vault.adapter.exists(root))) return [];
+    const result = [];
+    const walk = async (dir) => {
+      const listed = await this.app.vault.adapter.list(dir);
+      listed.files.forEach((path) => result.push(path));
+      for (const child of listed.folders) {
+        await walk(child);
+      }
+    };
+    await walk(root);
+    return result;
   }
 
   async readExistingData(path) {
@@ -684,11 +938,15 @@ class WorklogPlugin extends Plugin {
   }
 
   async writeData(data) {
-    await this.ensureAdapterFolder(this.settings.dataFolder);
-    const month = data.month || currentMonth();
+    const month = isValidMonth(data.month) ? data.month : currentMonth();
+    await this.ensureAdapterFolder(this.monthDataFolder(month));
     const path = this.dataPath(month);
     const next = Object.assign({}, data, { updatedAt: new Date().toISOString() });
     await this.app.vault.adapter.write(path, JSON.stringify(next, null, 2));
+    const legacyPath = this.legacyDataPath(month);
+    if (legacyPath !== path && await this.app.vault.adapter.exists(legacyPath)) {
+      await this.removeLegacyDataFile(legacyPath);
+    }
     await this.maybeSyncMonthNote(next);
     this.refreshMonthViews(month);
     this.refreshYearDashboards();
@@ -718,6 +976,17 @@ class WorklogPlugin extends Plugin {
     return this.app.vault.create(path, content);
   }
 
+  async removeLegacyDataFile(path) {
+    const file = this.app.vault.getAbstractFileByPath(path);
+    if (file) {
+      await this.app.vault.delete(file);
+      return;
+    }
+    if (typeof this.app.vault.adapter.remove === 'function' && await this.app.vault.adapter.exists(path)) {
+      await this.app.vault.adapter.remove(path);
+    }
+  }
+
   async openView(month = currentMonth()) {
     if (!isValidMonth(month)) {
       new Notice(`无效月份：${month}`);
@@ -730,41 +999,46 @@ class WorklogPlugin extends Plugin {
     this.app.workspace.revealLeaf(leaf);
   }
 
-  async openYearDashboard() {
+  async createMonthDashboard(month = currentMonth()) {
+    if (!isValidMonth(month)) {
+      new Notice(`无效月份：${month}`);
+      return;
+    }
+    const data = await this.readData(month);
+    await this.maybeSyncMonthNote(data);
     const leaf = this.app.workspace.getLeaf(false);
-    await leaf.setViewState({ type: YEAR_VIEW_TYPE, active: true, state: {} });
+    await leaf.setViewState({ type: VIEW_TYPE, active: true, state: { month } });
     this.app.workspace.revealLeaf(leaf);
-  }
-}
-
-class MonthPickerModal extends Modal {
-  constructor(app, plugin, initialMonth) {
-    super(app);
-    this.plugin = plugin;
-    this.initialMonth = isValidMonth(initialMonth) ? initialMonth : currentMonth();
+    new Notice(`已创建 ${month} 工时工作台`);
   }
 
-  onOpen() {
-    this.setTitle('选择工时月份');
-    const [initialYear, initialMonthNumber] = this.initialMonth.split('-');
-    const year = this.addInput('年份', initialYear, 'number');
-    const month = this.addInput('月份', String(Number(initialMonthNumber)), 'number');
-    new Setting(this.contentEl).addButton((button) => button.setButtonText('打开工时工作台').setCta().onClick(async () => {
-      const selectedMonth = normalizeMonth(year.value, month.value);
-      if (!selectedMonth) return new Notice('请输入有效年月，例如 2026 年 5 月');
-      await this.plugin.openView(selectedMonth);
-      this.close();
-    }));
+  async dataMonths() {
+    const files = await this.dataFiles();
+    return Array.from(new Set(files.map((path) => this.monthFromDataPath(path)).filter(isValidMonth))).sort((a, b) => b.localeCompare(a));
   }
 
-  addInput(label, value = '', type = 'text') {
-    let input;
-    new Setting(this.contentEl).setName(label).addText((text) => {
-      input = text.inputEl;
-      input.type = type;
-      input.value = value;
+  async availableYears() {
+    const years = new Set();
+    const files = await this.dataFiles();
+    files.forEach((path) => {
+      const month = this.monthFromDataPath(path);
+      if (isValidMonth(month)) years.add(month.slice(0, 4));
     });
-    return input;
+    return Array.from(years).sort((a, b) => b.localeCompare(a));
+  }
+
+  async hasYearData(year) {
+    const targetYear = normalizeYear(year);
+    if (!targetYear) return false;
+    const years = await this.availableYears();
+    return years.includes(targetYear);
+  }
+
+  async openYearDashboard(year = currentYear()) {
+    const targetYear = normalizeYear(year) || currentYear();
+    const leaf = this.app.workspace.getLeaf(false);
+    await leaf.setViewState({ type: YEAR_VIEW_TYPE, active: true, state: { year: targetYear } });
+    this.app.workspace.revealLeaf(leaf);
   }
 }
 
@@ -831,6 +1105,26 @@ class WorklogView extends ItemView {
     return button;
   }
 
+  iconButton(text, icon, className, onClick) {
+    const button = this.button(text, className, onClick);
+    button.prepend(this.el('span', `worklog-button-icon ${icon}`));
+    return button;
+  }
+
+  actionIconButton(icon, label, className, onClick, disabled = false) {
+    const button = this.el('button', `worklog-icon-button ${className || ''}`.trim());
+    button.type = 'button';
+    button.setAttribute('aria-label', label);
+    button.setAttribute('title', label);
+    button.disabled = disabled;
+    setIcon(button, icon);
+    button.addEventListener('click', (event) => {
+      if (button.disabled) return;
+      onClick(event);
+    });
+    return button;
+  }
+
   render() {
     this.contentEl.empty();
     const root = this.contentEl.createDiv({ cls: 'worklog-plugin-view' });
@@ -839,54 +1133,68 @@ class WorklogView extends ItemView {
       return;
     }
     const d = this.derived();
+    const main = this.el('main', 'worklog-main');
     const header = this.el('div', 'worklog-header');
-    header.appendChild(this.el('h2', '', `${this.data.month} 工时工作台`));
+    const title = this.el('div', 'worklog-title-block');
+    title.appendChild(this.el('h2', '', `${formatMonthTitle(this.data.month)}工时工作台`));
+    title.appendChild(this.el('p', '', '任务、工时、日历和统计在同一个月度视图里完成。'));
+    header.appendChild(title);
     const actions = this.el('div', 'worklog-actions');
-    actions.appendChild(this.button('新增任务', '', () => new TaskModal(this.app, this, this.selectedDate).open()));
-    actions.appendChild(this.button('新增工时', 'primary', () => new LogModal(this.app, this, this.selectedDate).open()));
+    actions.appendChild(this.iconButton('新增任务', 'plus', '', () => new TaskModal(this.app, this, this.selectedDate).open()));
+    actions.appendChild(this.iconButton('新增工时', 'plus', 'primary', () => new LogModal(this.app, this, this.selectedDate).open()));
+    actions.appendChild(this.button('同步月度笔记', 'success', async () => {
+      await this.plugin.syncMonthNote(this.data);
+      new Notice('已同步月度笔记');
+    }));
     header.appendChild(actions);
-    root.appendChild(header);
+    main.appendChild(header);
 
-    root.appendChild(this.renderDashboard(d));
-    root.appendChild(this.renderCalendar(d));
-    root.appendChild(this.renderTasks(d));
-    root.appendChild(this.renderLogs(d));
+    main.appendChild(this.renderDashboard(d));
+    const monthGrid = this.el('div', 'worklog-month-grid');
+    monthGrid.appendChild(this.renderChartCard(d));
+    monthGrid.appendChild(this.renderTasks(d));
+    monthGrid.appendChild(this.renderLogs(d));
+    monthGrid.appendChild(this.renderCalendar(d));
+    main.appendChild(monthGrid);
+    root.appendChild(main);
   }
 
   renderDashboard(d) {
     const section = this.el('section', 'worklog-dashboard');
-    const head = this.el('div', 'worklog-section-head');
-    head.appendChild(this.el('h3', '', '月度数据看板'));
-    const hint = this.el('div', 'worklog-hint', '实时读取本地 JSON');
-    head.appendChild(hint);
-    section.appendChild(head);
-
     const diff = d.totalActual - d.totalPlanned;
     const stats = this.el('div', 'worklog-stats');
-    stats.appendChild(this.stat('计划工时', formatHours(d.totalPlanned)));
-    stats.appendChild(this.stat('实际工时', formatHours(d.totalActual)));
-    stats.appendChild(this.stat('差异', formatSignedHours(diff), diff > 0 ? 'warn' : diff < 0 ? 'good' : ''));
-    stats.appendChild(this.stat('任务数', String(this.data.tasks.length)));
-    stats.appendChild(this.stat('记录数', String(this.data.logs.length)));
+    stats.appendChild(this.stat('计划工时', `${formatHours(d.totalPlanned)}h`, `本月 ${this.data.tasks.length} 个任务`));
+    stats.appendChild(this.stat('实际工时', `${formatHours(d.totalActual)}h`, `已记录 ${this.data.logs.length} 条工时`, 'actual'));
+    stats.appendChild(this.stat('完成率', `${completionPercent(d.totalPlanned, d.totalActual)}%`, diff === 0 ? '计划与实际一致' : `差异 ${formatSignedHours(diff)}h`, 'good'));
+    stats.appendChild(this.stat('任务类型', `${d.taskCategories.length}类`, '支持自定义颜色', 'type'));
     section.appendChild(stats);
-    section.appendChild(this.renderChart(d));
     return section;
   }
 
-  stat(label, value, tone = '') {
+  stat(label, value, desc = '', tone = '') {
     const item = this.el('div', `worklog-stat ${tone ? `worklog-stat-${tone}` : ''}`.trim());
     item.appendChild(this.el('span', 'label', label));
     item.appendChild(this.el('strong', '', value));
+    if (desc) item.appendChild(this.el('small', '', desc));
     return item;
+  }
+
+  renderChartCard(d) {
+    const section = this.el('section', 'worklog-card worklog-chart-card');
+    const head = this.el('div', 'worklog-card-head');
+    head.appendChild(this.el('h3', '', '计划 / 实际工时'));
+    const legend = this.el('div', 'worklog-chart-legend');
+    legend.appendChild(this.legendItem('计划', 'planned'));
+    legend.appendChild(this.legendItem('实际', 'actual'));
+    head.appendChild(legend);
+    section.appendChild(head);
+    section.appendChild(this.renderChart(d));
+    return section;
   }
 
   renderChart(d) {
     const rows = taskTypeRowsForData(this.data, d).map((category) => ({ category, planned: category.planned, actual: category.actual }));
     const panel = this.el('div', 'worklog-chart-panel');
-    const legend = this.el('div', 'worklog-chart-legend');
-    legend.appendChild(this.legendItem('计划工时', 'planned'));
-    legend.appendChild(this.legendItem('实际工时', 'actual'));
-    panel.appendChild(legend);
     if (!rows.length) {
       panel.appendChild(this.el('div', 'worklog-empty', '暂无任务数据'));
       return panel;
@@ -945,7 +1253,7 @@ class WorklogView extends ItemView {
     tooltip.appendChild(this.el('strong', 'worklog-chart-tooltip-title', row.category.label));
     tooltip.appendChild(this.tooltipRow('计划工时', 'planned', row.planned));
     tooltip.appendChild(this.tooltipRow('实际工时', 'actual', row.actual));
-    tooltip.appendChild(this.tooltipRow('计划占比', 'planned', formatPercent(row.category.plannedRatio)));
+    tooltip.appendChild(this.tooltipRow('占比', 'planned', formatPercent(row.category.plannedRatio)));
   }
 
   positionChartTooltip(event, chartBody, tooltip) {
@@ -1014,8 +1322,11 @@ class WorklogView extends ItemView {
   }
 
   renderCalendar(d) {
-    const section = this.el('section', 'worklog-section');
-    section.appendChild(this.el('h3', '', '日历'));
+    const section = this.el('section', 'worklog-card worklog-calendar-card');
+    const head = this.el('div', 'worklog-card-head');
+    head.appendChild(this.el('h3', '', `${formatMonthTitle(this.data.month)}日历`));
+    head.appendChild(this.el('span', 'worklog-badge', `${(this.data.dailyStatus.completedDates || []).length} 天`));
+    section.appendChild(head);
     const grid = this.el('div', 'worklog-calendar');
     ['一', '二', '三', '四', '五', '六', '日'].forEach((label) => grid.appendChild(this.el('div', 'weekday', label)));
     const completed = new Set(this.data.dailyStatus.completedDates || []);
@@ -1039,7 +1350,12 @@ class WorklogView extends ItemView {
         await this.save(Object.assign({}, this.data, { dailyStatus: { completedDates: Array.from(dates).sort() } }));
       });
       day.appendChild(checkbox);
-      if (cell.count) day.appendChild(this.el('span', 'day-hours', `${formatHours(cell.hours)}h`));
+      if (cell.count) {
+        const hours = this.el('span', 'day-hours', `工时合计 ${formatHours(cell.hours)}h`);
+        hours.id = `worklog-day-hours-${cell.date}`;
+        day.setAttribute('aria-describedby', hours.id);
+        day.appendChild(hours);
+      }
       day.addEventListener('click', () => {
         this.selectedDate = this.selectedDate === cell.date ? '' : cell.date;
         this.render();
@@ -1051,22 +1367,28 @@ class WorklogView extends ItemView {
   }
 
   renderTasks(d) {
-    const section = this.el('section', 'worklog-section');
-    section.appendChild(this.el('h3', '', '任务清单'));
-    const table = this.el('table', 'worklog-table');
-    table.innerHTML = '<thead><tr><th>任务 ID</th><th>任务</th><th>类型</th><th>issue</th><th>计划</th><th>实际</th><th>状态</th><th>操作</th></tr></thead>';
-    const body = this.el('tbody');
+    const section = this.el('section', 'worklog-card worklog-task-card');
+    const head = this.el('div', 'worklog-card-head');
+    head.appendChild(this.el('h3', '', '任务清单'));
+    head.appendChild(this.el('span', 'worklog-badge', `${this.data.tasks.length} 个任务`));
+    section.appendChild(head);
+    const list = this.el('div', 'worklog-task-list');
     this.data.tasks.forEach((task, index) => {
-      const tr = this.el('tr', `worklog-task-row ${statusClass(task.status)}`);
       const category = d.categoryById.get(task.category);
-      tr.appendChild(this.td(task.id, 'worklog-key-text'));
-      tr.appendChild(this.td(task.name, 'worklog-key-text'));
-      tr.appendChild(this.td(category ? category.label : task.category, 'worklog-key-text'));
-      tr.appendChild(this.td(task.issue || '-', 'worklog-key-text'));
-      tr.appendChild(this.td(`${formatHours(task.plannedHours)}h`, 'worklog-key-text'));
-      tr.appendChild(this.td(`${formatHours(d.actualByTask.get(task.id) || 0)}h`, 'worklog-key-text'));
-      const statusTd = this.el('td');
+      const row = this.el('div', `worklog-task-item ${statusClass(task.status)}`);
+      row.style.setProperty('--worklog-task-color', categoryColorForData(category, index));
+      row.appendChild(this.el('span', 'worklog-task-dot'));
+      const main = this.el('div', 'worklog-task-main');
+      main.appendChild(this.el('strong', '', task.name));
+      const meta = this.el('span', '', `${category ? category.label : task.category}${task.issue ? ` · ${task.issue}` : ''}`);
+      main.appendChild(meta);
+      row.appendChild(main);
+      const plannedHours = this.el('span', 'worklog-task-hours', `${formatHours(task.plannedHours)}h`);
+      plannedHours.setAttribute('title', '计划工时');
+      plannedHours.setAttribute('aria-label', `计划工时 ${formatHours(task.plannedHours)} 小时`);
+      row.appendChild(plannedHours);
       const select = document.createElement('select');
+      select.className = 'worklog-status-select';
       STATUSES.forEach((status) => select.appendChild(new Option(status.label, status.id)));
       select.value = task.status;
       select.addEventListener('change', async () => {
@@ -1074,53 +1396,59 @@ class WorklogView extends ItemView {
         tasks[index] = Object.assign({}, task, { status: select.value });
         await this.save(Object.assign({}, this.data, { tasks }));
       });
-      statusTd.appendChild(select);
-      tr.appendChild(statusTd);
-      const actionTd = this.el('td');
-      actionTd.appendChild(this.button('删除', 'ghost', async () => {
-        const refs = this.data.logs.filter((log) => log.taskId === task.id).length;
-        if (refs > 0 && !confirm(`这个任务已有 ${refs} 条工时记录，删除任务会同时删除这些记录。继续？`)) return;
+      row.appendChild(select);
+      const refs = d.logCountByTask.get(task.id) || 0;
+      row.appendChild(this.actionIconButton('trash-2', refs > 0 ? '已有工时记录，不能删除' : '删除任务', 'danger subtle', async () => {
         await this.save(Object.assign({}, this.data, {
           tasks: this.data.tasks.filter((_, i) => i !== index),
           logs: this.data.logs.filter((log) => log.taskId !== task.id)
         }));
-      }));
-      tr.appendChild(actionTd);
-      body.appendChild(tr);
+      }, refs > 0));
+      list.appendChild(row);
     });
-    table.appendChild(body);
-    section.appendChild(table);
+    if (!this.data.tasks.length) list.appendChild(this.el('div', 'worklog-empty worklog-empty-compact', '暂无任务'));
+    section.appendChild(list);
     return section;
   }
 
   renderLogs(d) {
-    const section = this.el('section', 'worklog-section');
+    const section = this.el('section', 'worklog-card worklog-log-card');
     const title = this.selectedDate ? `每日工时明细：${this.selectedDate}` : '每日工时明细';
-    section.appendChild(this.el('h3', '', title));
-    const table = this.el('table', 'worklog-table');
-    table.innerHTML = '<thead><tr><th>日期</th><th>任务 ID</th><th>任务</th><th>工时</th><th>做了什么</th><th>issue</th><th>操作</th></tr></thead>';
+    const head = this.el('div', 'worklog-card-head');
+    head.appendChild(this.el('h3', '', title));
+    head.appendChild(this.el('span', 'worklog-badge', 'JSON 本地保存'));
+    section.appendChild(head);
+    const tableWrap = this.el('div', 'worklog-table-scroll');
+    const table = this.el('table', 'worklog-table worklog-log-table');
+    table.innerHTML = '<thead><tr><th>日期</th><th>任务</th><th>工时</th><th>做了什么</th><th>issue</th><th>操作</th></tr></thead>';
     const body = this.el('tbody');
-    const rows = this.selectedDate ? this.data.logs.filter((log) => log.date === this.selectedDate) : this.data.logs;
-    rows.forEach((log) => {
-      const index = this.data.logs.findIndex((item) => item.id === log.id);
+    const rows = this.data.logs
+      .map((log, index) => ({ log, index }))
+      .filter(({ log }) => !this.selectedDate || log.date === this.selectedDate);
+    rows.forEach(({ log, index }) => {
       const task = d.tasksById.get(log.taskId);
       const tr = this.el('tr');
       tr.appendChild(this.td(log.date));
-      tr.appendChild(this.td(log.taskId));
       tr.appendChild(this.td(task ? task.name : '未找到任务'));
       tr.appendChild(this.td(`${formatHours(log.hours)}h`));
       tr.appendChild(this.td(log.work));
       tr.appendChild(this.td(log.issueLink || (task ? task.issue : '') || '-'));
-      const actionTd = this.el('td');
-      actionTd.appendChild(this.button('删除', 'ghost', async () => {
+      const actionTd = this.el('td', 'worklog-table-actions-cell');
+      const actions = this.el('div', 'worklog-row-actions');
+      actions.appendChild(this.actionIconButton('pencil', '编辑工时记录', 'subtle', () => {
+        new LogModal(this.app, this, log.date, log).open();
+      }));
+      actions.appendChild(this.actionIconButton('trash-2', '删除工时记录', 'danger subtle', async () => {
         if (!confirm('删除这条工时记录？')) return;
         await this.save(Object.assign({}, this.data, { logs: this.data.logs.filter((_, i) => i !== index) }));
       }));
+      actionTd.appendChild(actions);
       tr.appendChild(actionTd);
       body.appendChild(tr);
     });
     table.appendChild(body);
-    section.appendChild(table);
+    tableWrap.appendChild(table);
+    section.appendChild(tableWrap);
     return section;
   }
 
@@ -1134,6 +1462,7 @@ class YearDashboardView extends ItemView {
     super(leaf);
     this.plugin = plugin;
     this.data = [];
+    this.selectedYear = currentMonth().slice(0, 4);
   }
 
   getViewType() {
@@ -1146,6 +1475,17 @@ class YearDashboardView extends ItemView {
 
   getIcon() {
     return 'bar-chart-3';
+  }
+
+  async setState(state, result) {
+    await super.setState(state, result);
+    const year = clean(state && state.year);
+    this.selectedYear = /^(20\d{2})$/.test(year) ? year : currentMonth().slice(0, 4);
+    await this.load();
+  }
+
+  getState() {
+    return Object.assign({}, super.getState(), { year: this.selectedYear });
   }
 
   async onOpen() {
@@ -1174,54 +1514,62 @@ class YearDashboardView extends ItemView {
     this.contentEl.empty();
     const root = this.contentEl.createDiv({ cls: 'worklog-plugin-view worklog-year-view' });
     const summaries = yearSummary(this.data);
+    const visibleSummary = summaries.find((summary) => summary.year === this.selectedYear) || null;
+    const titleText = this.selectedYear ? `${this.selectedYear} 年度工时看板` : '年度工时看板';
+    const visibleSummaries = visibleSummary ? [visibleSummary] : [];
 
+    const main = this.el('main', 'worklog-main');
     const header = this.el('div', 'worklog-header');
-    header.appendChild(this.el('h2', '', '年度工时看板'));
+    const title = this.el('div', 'worklog-title-block');
+    title.appendChild(this.el('h2', '', titleText));
+    title.appendChild(this.el('p', '', '自动汇总全年 JSON 数据，查看计划、实际和任务类型占比。'));
+    header.appendChild(title);
     const actions = this.el('div', 'worklog-actions');
     actions.appendChild(this.button('刷新', '', () => this.load()));
+    actions.appendChild(this.button('打开当前月', 'primary', () => this.plugin.openView(currentMonth())));
     header.appendChild(actions);
-    root.appendChild(header);
+    main.appendChild(header);
 
-    if (!summaries.length) {
-      root.appendChild(this.el('div', 'worklog-empty', '暂无年度数据'));
+    if (!visibleSummaries.length) {
+      main.appendChild(this.el('div', 'worklog-empty', `暂无 ${this.selectedYear} 年度数据`));
+      root.appendChild(main);
       return;
     }
 
-    summaries.forEach((summary) => root.appendChild(this.renderYear(summary)));
+    visibleSummaries.forEach((summary) => main.appendChild(this.renderYear(summary)));
+    root.appendChild(main);
   }
 
   renderYear(summary) {
     const section = this.el('section', 'worklog-year-section');
-    const header = this.el('div', 'worklog-section-head');
-    header.appendChild(this.el('h3', '', `${summary.year} 年`));
-    header.appendChild(this.el('div', 'worklog-hint', `汇总 ${summary.months.length} 个月 · ${summary.totalLogs} 条记录`));
-    section.appendChild(header);
     section.appendChild(this.renderSummaryStats(summary));
     const body = this.el('div', 'worklog-year-body');
-    body.appendChild(this.renderTaskTypePie(summary));
     body.appendChild(this.renderMonthlyLineChart(summary));
+    body.appendChild(this.renderTaskTypePie(summary));
     section.appendChild(body);
+    section.appendChild(this.renderMonthCards(summary));
     return section;
   }
 
   renderSummaryStats(summary) {
-    const panel = this.el('div', 'worklog-year-panel');
-    panel.appendChild(this.el('div', 'worklog-year-panel-title', '总数据统计'));
+    const panel = this.el('div', 'worklog-dashboard');
     const diff = summary.totalActual - summary.totalPlanned;
-    const stats = this.el('div', 'worklog-year-stats');
-    stats.appendChild(this.summaryStat('月份', String(summary.months.length)));
-    stats.appendChild(this.summaryStat('计划工时', `${formatHours(summary.totalPlanned)}h`));
-    stats.appendChild(this.summaryStat('实际工时', `${formatHours(summary.totalActual)}h`));
-    stats.appendChild(this.summaryStat('差异', `${formatSignedHours(diff)}h`, diff > 0 ? 'warn' : diff < 0 ? 'good' : ''));
-    stats.appendChild(this.summaryStat('任务数量', String(summary.totalTasks)));
+    const stats = this.el('div', 'worklog-stats');
+    stats.appendChild(this.summaryStat('计划工时', `${formatHours(summary.totalPlanned)}h`, `汇总 ${summary.months.length} 个月`));
+    stats.appendChild(this.summaryStat('实际工时', `${formatHours(summary.totalActual)}h`, `记录 ${summary.totalLogs} 条`, 'actual'));
+    stats.appendChild(this.summaryStat('完成率', `${completionPercent(summary.totalPlanned, summary.totalActual)}%`, diff === 0 ? '计划与实际一致' : `差异 ${formatSignedHours(diff)}h`, 'good'));
+    stats.appendChild(this.summaryStat('任务类型', `${summary.categoryRows.length}类`, `任务 ${summary.totalTasks} 个`, 'type'));
     panel.appendChild(stats);
     return panel;
   }
 
   renderTaskTypePie(summary) {
-    const panel = this.el('div', 'worklog-year-panel worklog-pie-panel');
-    panel.appendChild(this.el('div', 'worklog-year-panel-title', '全年任务类型统计'));
-    if (!summary.categoryRows.length || summary.totalTasks <= 0) {
+    const panel = this.el('div', 'worklog-card worklog-pie-panel');
+    const head = this.el('div', 'worklog-card-head');
+    head.appendChild(this.el('h3', '', '任务类型占比'));
+    head.appendChild(this.el('span', 'worklog-badge', `${summary.months.length} 个月`));
+    panel.appendChild(head);
+    if (!summary.categoryRows.length || summary.totalPlanned <= 0) {
       panel.appendChild(this.el('div', 'worklog-empty worklog-empty-compact', '暂无任务类型数据'));
       return panel;
     }
@@ -1238,12 +1586,12 @@ class YearDashboardView extends ItemView {
 
     const visual = this.el('div', 'worklog-pie-visual');
     const tooltip = this.el('div', 'worklog-year-tooltip worklog-pie-tooltip');
-    const activeRows = summary.categoryRows.filter((category) => category.tasks > 0);
+    const activeRows = summary.categoryRows.filter((category) => category.planned > 0);
     let angle = -90;
     activeRows.forEach((category, rowIndex) => {
       const index = summary.categoryRows.indexOf(category);
       const color = categoryColorForData(category, index);
-      const ratio = category.tasks / summary.totalTasks;
+      const ratio = category.planned / summary.totalPlanned;
       const startAngle = angle;
       const endAngle = rowIndex === activeRows.length - 1 ? 270 : startAngle + ratio * 360;
       const normalPath = this.donutSlicePath(center, center, outerRadius, innerRadius, startAngle, endAngle);
@@ -1259,7 +1607,7 @@ class YearDashboardView extends ItemView {
       slice.style.fill = color;
       slice.style.setProperty('--worklog-pie-focus', color);
       slice.setAttribute('tabindex', '0');
-      slice.setAttribute('aria-label', `${category.label}：${category.tasks} 个任务，${formatPercent(category.taskRatio)}`);
+      slice.setAttribute('aria-label', `${category.label}：计划 ${formatHours(category.planned)} 小时，${formatPercent(category.plannedRatio)}`);
       slice.addEventListener('mousemove', (event) => this.showPieTooltip(event, visual, tooltip, category, color));
       slice.addEventListener('mouseenter', (event) => {
         setActive(true);
@@ -1286,8 +1634,8 @@ class YearDashboardView extends ItemView {
 
     const legendRows = activeRows.map((category) => ({ category, color: categoryColorForData(category, summary.categoryRows.indexOf(category)) }));
     const legendWrap = this.el('div', 'worklog-pie-legend-wrap');
-    const prev = this.el('button', 'worklog-pie-legend-arrow', '◀');
-    const next = this.el('button', 'worklog-pie-legend-arrow', '▶');
+    const prev = this.el('button', 'worklog-pie-legend-arrow', '‹');
+    const next = this.el('button', 'worklog-pie-legend-arrow', '›');
     prev.type = 'button';
     next.type = 'button';
     const legend = this.el('div', 'worklog-pie-legend');
@@ -1343,8 +1691,8 @@ class YearDashboardView extends ItemView {
   renderPieTooltip(tooltip, category, color) {
     tooltip.textContent = '';
     tooltip.style.setProperty('--worklog-tooltip-color', color);
-    tooltip.appendChild(this.tooltipMetricRow(category.label, String(category.tasks), color));
-    tooltip.appendChild(this.tooltipMetricRow('占比', formatPercent(category.taskRatio), color, true));
+    tooltip.appendChild(this.tooltipMetricRow(category.label, `${formatHours(category.planned)}h`, color));
+    tooltip.appendChild(this.tooltipMetricRow('占比', formatPercent(category.plannedRatio), color, true));
   }
 
   centerPieTooltip(visual, target, tooltip, category, color) {
@@ -1380,16 +1728,23 @@ class YearDashboardView extends ItemView {
     return row;
   }
 
-  summaryStat(label, value, tone = '') {
-    const item = this.el('div', `worklog-year-stat ${tone ? `worklog-year-stat-${tone}` : ''}`.trim());
-    item.appendChild(this.el('span', '', label));
+  summaryStat(label, value, desc = '', tone = '') {
+    const item = this.el('div', `worklog-stat ${tone ? `worklog-stat-${tone}` : ''}`.trim());
+    item.appendChild(this.el('span', 'label', label));
     item.appendChild(this.el('strong', '', value));
+    if (desc) item.appendChild(this.el('small', '', desc));
     return item;
   }
 
   renderMonthlyLineChart(summary) {
-    const panel = this.el('div', 'worklog-year-panel worklog-line-panel');
-    panel.appendChild(this.el('div', 'worklog-year-panel-title', '每月工时统计'));
+    const panel = this.el('div', 'worklog-card worklog-line-panel');
+    const head = this.el('div', 'worklog-card-head');
+    head.appendChild(this.el('h3', '', '月度趋势'));
+    const legendHead = this.el('div', 'worklog-chart-legend');
+    legendHead.appendChild(this.legendItem('计划', '#64748b'));
+    legendHead.appendChild(this.legendItem('实际', '#2563eb'));
+    head.appendChild(legendHead);
+    panel.appendChild(head);
     const visual = this.el('div', 'worklog-line-visual');
     const tooltip = this.el('div', 'worklog-year-tooltip worklog-line-tooltip');
     const months = Array.from({ length: 12 }, (_, index) => {
@@ -1400,7 +1755,8 @@ class YearDashboardView extends ItemView {
     const max = chartScaleMax(Math.max(1, ...values));
     const width = 720;
     const height = 300;
-    const pad = { left: 52, right: 24, top: 28, bottom: 54 };
+    const pad = { left: 52, right: 24, top: 28, bottom: 72 };
+    const xLabelY = height - 30;
     const x = (index) => pad.left + (index / 11) * (width - pad.left - pad.right);
     const y = (value) => pad.top + (1 - value / max) * (height - pad.top - pad.bottom);
     const pointsFor = (key) => months.map((month, index) => ({ x: x(index), y: y(month[key]), value: month[key], month: month.month }));
@@ -1451,7 +1807,7 @@ class YearDashboardView extends ItemView {
     svg.appendChild(this.svgEl('path', { d: this.linePath(planned), class: 'worklog-line-path planned' }));
     svg.appendChild(this.svgEl('path', { d: this.linePath(actual), class: 'worklog-line-path actual' }));
     months.forEach((month, index) => {
-      const label = this.svgEl('text', { x: x(index), y: height - 14, class: 'worklog-line-x-label', 'text-anchor': 'end', transform: `rotate(-55 ${x(index)} ${height - 14})` });
+      const label = this.svgEl('text', { x: x(index), y: xLabelY, class: 'worklog-line-x-label', 'text-anchor': 'end', transform: `rotate(-55 ${x(index)} ${xLabelY})` });
       label.textContent = month.month;
       svg.appendChild(label);
     });
@@ -1461,10 +1817,6 @@ class YearDashboardView extends ItemView {
     visual.appendChild(svg);
     visual.appendChild(tooltip);
     panel.appendChild(visual);
-    const legend = this.el('div', 'worklog-line-legend');
-    legend.appendChild(this.legendItem('计划工时', '#64748b'));
-    legend.appendChild(this.legendItem('实际工时', '#ff5c7c'));
-    panel.appendChild(legend);
     return panel;
   }
 
@@ -1498,7 +1850,7 @@ class YearDashboardView extends ItemView {
     tooltip.textContent = '';
     tooltip.appendChild(this.el('strong', 'worklog-year-tooltip-title', month.month));
     tooltip.appendChild(this.tooltipMetricRow('计划工时', `${formatHours(month.plannedHours)}h`, '#64748b'));
-    tooltip.appendChild(this.tooltipMetricRow('实际工时', `${formatHours(month.actualHours)}h`, '#ff5c7c'));
+    tooltip.appendChild(this.tooltipMetricRow('实际工时', `${formatHours(month.actualHours)}h`, '#2563eb'));
   }
 
   renderLinePoints(svg, points, tone) {
@@ -1551,12 +1903,38 @@ class YearDashboardView extends ItemView {
   }
 
   legendItem(label, color) {
-    const item = this.el('span', 'worklog-line-legend-item');
-    const swatch = this.el('span', 'worklog-line-legend-swatch');
+    const item = this.el('span', 'worklog-chart-legend-item');
+    const swatch = this.el('span', 'worklog-chart-swatch custom');
     swatch.style.background = color;
     item.appendChild(swatch);
     item.appendChild(document.createTextNode(label));
     return item;
+  }
+
+  renderMonthCards(summary) {
+    const wrap = this.el('div', 'worklog-month-cards');
+    summary.months.slice(-3).forEach((month) => {
+      const card = this.el('div', 'worklog-month-card');
+      const monthName = `${Number(month.month.slice(5, 7))} 月`;
+      card.appendChild(this.el('strong', '', monthName));
+      card.appendChild(this.el('span', 'worklog-badge', `${formatHours(month.actualHours)}h`));
+      const preview = this.el('div', 'worklog-mini-bars');
+      const planned = Math.max(1, month.plannedHours);
+      const actual = Math.max(0, month.actualHours);
+      preview.appendChild(this.miniBar('blue', Math.min(100, (actual / planned) * 88)));
+      preview.appendChild(this.miniBar('teal', Math.min(86, 42 + (month.logs || 0) * 3)));
+      preview.appendChild(this.miniBar('amber', Math.min(82, 45 + (month.tasks || 0) * 5)));
+      preview.appendChild(this.miniBar('muted', 52));
+      card.appendChild(preview);
+      wrap.appendChild(card);
+    });
+    return wrap;
+  }
+
+  miniBar(className, width) {
+    const bar = this.el('i', className);
+    bar.style.width = `${Math.max(8, Math.min(100, width))}%`;
+    return bar;
   }
 
   svgEl(tag, attrs) {
@@ -1574,19 +1952,23 @@ class TaskModal extends Modal {
   }
 
   onOpen() {
+    this.modalEl.addClass('worklog-modal');
     this.setTitle('新增任务');
+    addModalTitleBadge(this.modalEl, '默认模板');
     const form = this.contentEl;
-    const category = this.addSelect('任务类型', categoriesForData(this.view.data).filter((item) => item.enabled !== false));
     const name = this.addInput('任务名称');
-    const issue = this.addInput('任务 issue');
+    const category = this.addSelect('任务类型', categoriesForData(this.view.data).filter((item) => item.enabled !== false));
     const planned = this.addInput('计划工时', '8', 'number');
+    const issue = this.addInput('关联 issue');
     const id = nextTaskId(this.view.data.tasks, this.view.data.month, this.selectedDate || `${this.view.data.month}-01`);
     new Setting(form).setName('任务 ID').setDesc(id);
     const hours = this.selectedDate ? this.addInput('当天工时', '1', 'number') : null;
     const work = this.selectedDate ? this.addTextArea('当天做了什么') : null;
-    new Setting(form).addButton((button) => button.setButtonText('新增任务').setCta().onClick(async () => {
+    new Setting(form)
+      .addButton((button) => button.setButtonText('取消').onClick(() => this.close()))
+      .addButton((button) => button.setButtonText('保存任务').setCta().onClick(async () => {
       if (!clean(name.value)) return new Notice('任务名称不能为空');
-      if (!clean(issue.value)) return new Notice('任务 issue 不能为空');
+      if (!clean(issue.value)) return new Notice('关联 issue 不能为空');
       if (!category.value) return new Notice('请先在插件设置中启用至少一个任务类型');
       const taskId = nextTaskId(this.view.data.tasks, this.view.data.month, this.selectedDate || `${this.view.data.month}-01`);
       const task = { id: taskId, name: clean(name.value), category: category.value, issue: clean(issue.value), plannedHours: toNumber(planned.value), status: 'doing' };
@@ -1632,41 +2014,59 @@ class TaskModal extends Modal {
 }
 
 class LogModal extends Modal {
-  constructor(app, view, selectedDate) {
+  constructor(app, view, selectedDate, editingLog = null) {
     super(app);
     this.view = view;
+    this.editingLog = editingLog;
     const today = todayIso();
-    this.selectedDate = selectedDate || (today.startsWith(view.data.month) ? today : `${view.data.month}-01`);
+    this.selectedDate = selectedDate || editingLog?.date || (today.startsWith(view.data.month) ? today : `${view.data.month}-01`);
   }
 
   onOpen() {
-    this.setTitle('新增工时');
-    const taskSelect = this.addTaskSelect();
-    const date = this.addInput('日期', this.selectedDate, 'date');
-    const hours = this.addInput('工时', '1', 'number');
-    const work = this.addTextArea('今天具体做了什么');
-    const issue = this.addInput('关联 issue');
-    new Setting(this.contentEl).addButton((button) => button.setButtonText('登记工时').setCta().onClick(async () => {
+    this.modalEl.addClass('worklog-modal');
+    this.modalEl.addClass('worklog-log-modal');
+    const editing = !!this.editingLog;
+    this.setTitle(editing ? '编辑工时' : '新增工时');
+    addModalTitleBadge(this.modalEl, this.selectedDate);
+    const date = this.addInput('日期', this.editingLog?.date || this.selectedDate, 'date');
+    const hours = this.addInput('工时', editing ? String(this.editingLog.hours || '') : '1', 'number');
+    const taskSelect = this.addTaskSelect(this.editingLog?.taskId || '');
+    const work = this.addTextArea('今天具体做了什么', this.editingLog?.work || '');
+    const issue = this.addInput('关联 issue', this.editingLog?.issueLink || '');
+    new Setting(this.contentEl)
+      .addButton((button) => button.setButtonText('取消').onClick(() => this.close()))
+      .addButton((button) => button.setButtonText(editing ? '保存修改' : '保存工时').setCta().onClick(async () => {
       const task = this.view.data.tasks.find((item) => item.id === taskSelect.value);
       if (!task) return new Notice('请选择任务');
       if (!clean(date.value).startsWith(this.view.data.month)) return new Notice(`日期必须属于当前月 ${this.view.data.month}`);
-      if (hasLogForTaskDate(this.view.data.logs, task.id, date.value)) return new Notice(`当天已登记过该任务 ID：${task.id}`);
+      if (hasLogForTaskDate(this.view.data.logs, task.id, date.value, this.editingLog?.id || '')) return new Notice(`当天已登记过该任务 ID：${task.id}`);
       const category = categoriesForData(this.view.data).find((item) => item.id === task.category);
       if (category && category.requiresLogIssue && !clean(issue.value)) return new Notice('该任务类型必须填写关联 issue');
       if (!clean(work.value)) return new Notice('工作内容不能为空');
-      const log = { id: `log-${Date.now().toString(36)}`, date: date.value, taskId: task.id, hours: toNumber(hours.value), work: clean(work.value), issueLink: clean(issue.value) };
+      const log = {
+        id: this.editingLog?.id || `log-${Date.now().toString(36)}`,
+        date: date.value,
+        taskId: task.id,
+        hours: toNumber(hours.value),
+        work: clean(work.value),
+        issueLink: clean(issue.value)
+      };
       if (log.hours <= 0) return new Notice('工时必须大于 0');
-      await this.view.save(Object.assign({}, this.view.data, { logs: this.view.data.logs.concat(log) }));
-      new Notice(`已登记 ${formatHours(log.hours)}h`);
+      const logs = editing
+        ? this.view.data.logs.map((item) => item.id === log.id ? log : item)
+        : this.view.data.logs.concat(log);
+      await this.view.save(Object.assign({}, this.view.data, { logs }));
+      new Notice(editing ? '已更新工时记录' : `已登记 ${formatHours(log.hours)}h`);
       this.close();
     }));
   }
 
-  addTaskSelect() {
+  addTaskSelect(value = '') {
     let select;
     new Setting(this.contentEl).setName('任务').addDropdown((dropdown) => {
       this.view.data.tasks.forEach((task) => dropdown.addOption(task.id, `${task.id} | ${task.name}`));
       select = dropdown.selectEl;
+      select.value = value || select.value;
     });
     return select;
   }
@@ -1681,10 +2081,11 @@ class LogModal extends Modal {
     return input;
   }
 
-  addTextArea(label) {
+  addTextArea(label, value = '') {
     let input;
     new Setting(this.contentEl).setName(label).addTextArea((text) => {
       input = text.inputEl;
+      input.value = value;
     });
     return input;
   }
@@ -1699,8 +2100,47 @@ class WorklogSettingTab extends PluginSettingTab {
   display() {
     const { containerEl } = this;
     containerEl.empty();
-    containerEl.createEl('h2', { text: 'Worklog 设置' });
-    new Setting(containerEl)
+    containerEl.addClass('worklog-settings-tab');
+    const root = containerEl.createDiv({ cls: 'worklog-plugin-view worklog-settings-view' });
+    const shell = root.createEl('main', { cls: 'worklog-main worklog-settings-shell' });
+    const header = shell.createDiv({ cls: 'worklog-settings-header' });
+    const title = header.createDiv({ cls: 'worklog-title-block' });
+    title.createEl('h2', { text: 'Worklog 插件设置' });
+    title.createEl('p', { text: '任务类型、默认任务模板、数据目录和月度笔记同步都可以在这里维护。' });
+    const headerActions = header.createDiv({ cls: 'worklog-settings-actions' });
+    const addTypeButton = headerActions.createEl('button', { cls: 'worklog-button primary', text: '新增任务类型' });
+    addTypeButton.addEventListener('click', async () => {
+      const next = this.plugin.settings.taskTypes.slice();
+      next.push({ id: makeId('type'), label: '新任务类型', color: categoryColor('', next.length), enabled: true, requiresLogIssue: false, sort: next.length });
+      this.plugin.settings.taskTypes = normalizeTaskTypes(next);
+      await this.plugin.saveSettings();
+      this.display();
+    });
+    const addTemplateButton = headerActions.createEl('button', { cls: 'worklog-button', text: '新增默认模板' });
+    addTemplateButton.addEventListener('click', async () => this.addTaskTemplate());
+
+    const typePanel = shell.createDiv({ cls: 'worklog-settings-panel' });
+    typePanel.createEl('h3', { text: '任务类型' });
+    typePanel.createEl('p', {
+      cls: 'setting-item-description',
+      text: '停用后不会出现在新建任务下拉框中，也不会参与新月份默认任务生成；历史任务和统计仍会按原类型显示。'
+    });
+    this.renderTaskTypeHeader(typePanel);
+    this.renderTaskTypes(typePanel);
+
+    const templatePanel = shell.createDiv({ cls: 'worklog-settings-panel' });
+    templatePanel.createEl('h3', { text: '新月份默认任务模板' });
+    templatePanel.createEl('p', {
+      cls: 'setting-item-description',
+      text: '用于创建新月份时自动生成任务；停用模板不会影响已经创建出来的历史任务。'
+    });
+    this.renderTemplateHeader(templatePanel);
+    this.renderTaskTemplates(templatePanel);
+
+    const configGrid = shell.createDiv({ cls: 'worklog-settings-config-grid' });
+    const syncPanel = configGrid.createDiv({ cls: 'worklog-settings-panel worklog-settings-config-panel' });
+    syncPanel.createEl('h3', { text: '月度笔记同步' });
+    new Setting(syncPanel)
       .setName('新建月度笔记并实时同步数据')
       .setDesc('关闭时只创建和维护本地 JSON 数据；开启后会为打开的月份创建月度笔记，并在工时数据变化时同步看板、日历、任务和明细。')
       .addToggle((toggle) => toggle.setValue(!!this.plugin.settings.createMonthlyNote).onChange(async (value) => {
@@ -1719,56 +2159,38 @@ class WorklogSettingTab extends PluginSettingTab {
           new Notice('已关闭月度笔记实时同步');
         }
       }));
-    new Setting(containerEl).setName('月度笔记目录').addText((text) => text.setValue(this.plugin.settings.worklogFolder).onChange(async (value) => {
+    new Setting(syncPanel).setName('月度笔记目录').addText((text) => text.setValue(this.plugin.settings.worklogFolder).onChange(async (value) => {
       this.plugin.settings.worklogFolder = clean(value) || DEFAULT_SETTINGS.worklogFolder;
       await this.plugin.saveSettings();
     }));
-    new Setting(containerEl).setName('数据目录').addText((text) => text.setValue(this.plugin.settings.dataFolder).onChange(async (value) => {
+    const dataPanel = configGrid.createDiv({ cls: 'worklog-settings-panel worklog-settings-config-panel' });
+    dataPanel.createEl('h3', { text: '数据目录' });
+    new Setting(dataPanel).setName('保存位置').addText((text) => text.setValue(this.plugin.settings.dataFolder).onChange(async (value) => {
       this.plugin.settings.dataFolder = clean(value) || DEFAULT_SETTINGS.dataFolder;
       await this.plugin.saveSettings();
     }));
-    containerEl.createEl('h3', { text: '任务类型管理' });
-    containerEl.createEl('p', {
-      cls: 'setting-item-description',
-      text: '停用后不会出现在新建任务下拉框中，也不会参与新月份默认任务生成；历史任务和统计仍会按原类型显示。'
+  }
+
+  async addTaskTemplate() {
+    const taskTypes = normalizeTaskTypes(this.plugin.settings.taskTypes);
+    if (!taskTypes.length) {
+      new Notice('请先新增任务类型，再新增默认任务模板');
+      return;
+    }
+    const next = this.plugin.settings.defaultTaskTemplates.slice();
+    next.push({
+      id: makeId('tpl'),
+      name: '新默认任务',
+      category: (taskTypes.find((item) => item.enabled !== false) || taskTypes[0]).id,
+      issue: '',
+      plannedHours: 1,
+      status: 'doing',
+      enabled: true,
+      sort: next.length
     });
-    this.renderTaskTypeHeader(containerEl);
-    this.renderTaskTypes(containerEl);
-    new Setting(containerEl).setClass('worklog-setting-add-row').addButton((button) => this.iconButton(button, 'plus', '新增任务类型', 'worklog-setting-add-button', true).onClick(async () => {
-      const next = this.plugin.settings.taskTypes.slice();
-      next.push({ id: makeId('type'), label: '新任务类型', color: categoryColor('', next.length), enabled: true, requiresLogIssue: false, sort: next.length });
-      this.plugin.settings.taskTypes = normalizeTaskTypes(next);
-      await this.plugin.saveSettings();
-      this.display();
-    }));
-    containerEl.createEl('h3', { text: '默认任务模板' });
-    containerEl.createEl('p', {
-      cls: 'setting-item-description',
-      text: '用于创建新月份时自动生成任务；停用模板不会影响已经创建出来的历史任务。'
-    });
-    this.renderTemplateHeader(containerEl);
-    this.renderTaskTemplates(containerEl);
-    new Setting(containerEl).setClass('worklog-setting-add-row').addButton((button) => this.iconButton(button, 'plus', '新增默认任务模板', 'worklog-setting-add-button', true).onClick(async () => {
-      const taskTypes = normalizeTaskTypes(this.plugin.settings.taskTypes);
-      if (!taskTypes.length) {
-        new Notice('请先新增任务类型，再新增默认任务模板');
-        return;
-      }
-      const next = this.plugin.settings.defaultTaskTemplates.slice();
-      next.push({
-        id: makeId('tpl'),
-        name: '新默认任务',
-        category: (taskTypes.find((item) => item.enabled !== false) || taskTypes[0]).id,
-        issue: '',
-        plannedHours: 1,
-        status: 'doing',
-        enabled: true,
-        sort: next.length
-      });
-      this.plugin.settings.defaultTaskTemplates = normalizeTaskTemplates(next, taskTypes);
-      await this.plugin.saveSettings();
-      this.display();
-    }));
+    this.plugin.settings.defaultTaskTemplates = normalizeTaskTemplates(next, taskTypes);
+    await this.plugin.saveSettings();
+    this.display();
   }
 
   iconButton(button, icon, label, extraClass = '', showTooltip = false) {
