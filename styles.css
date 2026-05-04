@@ -140,7 +140,7 @@
 }
 
 .worklog-setting-header-template {
-  grid-template-columns: 56px minmax(150px, 1fr) minmax(128px, 160px) 64px 54px 56px;
+  grid-template-columns: 56px minmax(140px, 1fr) minmax(120px, 0.75fr) minmax(128px, 160px) 64px 54px 56px;
   gap: 8px;
 }
 
@@ -156,7 +156,8 @@
 
 .worklog-setting-row-type .setting-item-control > :first-child,
 .worklog-setting-row-template .setting-item-control > :first-child,
-.worklog-setting-row-template .setting-item-control > :nth-child(2) {
+.worklog-setting-row-template .setting-item-control > :nth-child(2),
+.worklog-setting-row-template .setting-item-control > :nth-child(3) {
   justify-self: stretch;
 }
 
@@ -178,12 +179,12 @@
 
 .worklog-setting-row-template {
   position: relative;
-  grid-template-columns: 56px minmax(150px, 1fr) minmax(128px, 160px) 64px 54px 56px;
+  grid-template-columns: 56px minmax(140px, 1fr) minmax(120px, 0.75fr) minmax(128px, 160px) 64px 54px 56px;
 }
 
 .worklog-setting-row-template .setting-item-control {
   grid-column: 2 / -1;
-  grid-template-columns: minmax(150px, 1fr) minmax(128px, 160px) 64px 54px 56px;
+  grid-template-columns: minmax(140px, 1fr) minmax(120px, 0.75fr) minmax(128px, 160px) 64px 54px 56px;
   gap: 8px;
 }
 

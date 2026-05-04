@@ -2353,6 +2353,7 @@ class WorklogSettingTab extends PluginSettingTab {
     next.push({
       id: makeId('tpl'),
       name: '新默认任务',
+      project: '',
       category: (taskTypes.find((item) => item.enabled !== false) || taskTypes[0]).id,
       issue: '',
       plannedHours: 1,
@@ -2563,7 +2564,7 @@ class WorklogSettingTab extends PluginSettingTab {
   renderTemplateHeader(containerEl) {
     const header = containerEl.createDiv({ cls: 'worklog-setting-header worklog-setting-header-template' });
     header.createEl('span', { text: '模板' });
-    ['任务名称', '任务类型', '计划工时', '启用', '删除'].forEach((label) => {
+    ['任务名称', '归属项目', '任务类型', '计划工时', '启用', '删除'].forEach((label) => {
       header.createEl('span', { text: label });
     });
   }
@@ -2578,6 +2579,9 @@ class WorklogSettingTab extends PluginSettingTab {
       setting.setName(`模板 ${index + 1}`).setDesc(template.enabled === false ? '已停用' : '已启用');
       setting.addText((text) => text.setPlaceholder('任务名称').setValue(template.name).onChange(async (value) => {
         await this.updateTaskTemplate(template.id, { name: clean(value) || template.name });
+      }));
+      setting.addText((text) => text.setPlaceholder('归属项目').setValue(template.project || '').onChange(async (value) => {
+        await this.updateTaskTemplate(template.id, { project: clean(value) });
       }));
       setting.addDropdown((dropdown) => {
         taskTypes.forEach((category) => dropdown.addOption(category.id, `${category.label}${category.enabled === false ? '（已停用）' : ''}`));
