@@ -1681,6 +1681,185 @@ button.worklog-pie-legend-arrow:disabled {
   min-width: 0;
 }
 
+.worklog-project-panel {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+}
+
+.worklog-project-head {
+  flex-wrap: wrap;
+}
+
+.worklog-project-title,
+.worklog-project-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.worklog-project-scope-select {
+  min-width: 118px;
+  min-height: 32px;
+  border-radius: 7px;
+  border-color: var(--worklog-border);
+  background: var(--background-primary);
+  color: var(--text-normal);
+  font-size: 13px;
+}
+
+.worklog-project-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  padding: 12px 16px;
+  border-bottom: 1px solid color-mix(in srgb, var(--worklog-border) 68%, transparent);
+  background: color-mix(in srgb, var(--background-secondary) 42%, transparent);
+}
+
+.worklog-project-summary-item {
+  min-width: 0;
+  border: 1px solid color-mix(in srgb, var(--worklog-border) 82%, transparent);
+  border-radius: 8px;
+  background: var(--background-primary);
+  padding: 10px 12px;
+}
+
+.worklog-project-summary-item span {
+  display: block;
+  color: var(--worklog-muted);
+  font-size: 11px;
+  font-weight: 720;
+  line-height: 1.2;
+}
+
+.worklog-project-summary-item strong {
+  display: block;
+  margin-top: 5px;
+  color: var(--worklog-heading);
+  font-size: 17px;
+  font-weight: 820;
+  line-height: 1.1;
+}
+
+.worklog-project-table-wrap {
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
+}
+
+.worklog-project-table-wrap::-webkit-scrollbar {
+  display: none;
+}
+
+.worklog-project-table {
+  width: 100%;
+  min-width: 860px;
+  table-layout: fixed;
+}
+
+.worklog-project-table th,
+.worklog-project-table td {
+  height: 48px;
+  box-sizing: border-box;
+}
+
+.worklog-project-table th:nth-child(1),
+.worklog-project-table td:nth-child(1) {
+  width: 48px;
+  text-align: right;
+  color: var(--worklog-muted);
+}
+
+.worklog-project-table th:nth-child(2),
+.worklog-project-table td:nth-child(2) {
+  width: 24%;
+}
+
+.worklog-project-table th:nth-child(3),
+.worklog-project-table td:nth-child(3),
+.worklog-project-table th:nth-child(4),
+.worklog-project-table td:nth-child(4) {
+  width: 18%;
+}
+
+.worklog-project-table th:nth-child(5),
+.worklog-project-table td:nth-child(5),
+.worklog-project-table th:nth-child(6),
+.worklog-project-table td:nth-child(6),
+.worklog-project-table th:nth-child(8),
+.worklog-project-table td:nth-child(8) {
+  width: 76px;
+}
+
+.worklog-project-table th:nth-child(7),
+.worklog-project-table td:nth-child(7) {
+  width: 112px;
+}
+
+.worklog-project-table td {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.worklog-project-name-text {
+  display: grid;
+  align-content: center;
+  gap: 3px;
+}
+
+.worklog-project-name-text strong,
+.worklog-project-name-text span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.worklog-project-name-text strong {
+  color: var(--worklog-heading);
+  font-size: 13px;
+  font-weight: 760;
+}
+
+.worklog-project-name-text span {
+  color: var(--worklog-muted);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.worklog-number-cell {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.worklog-project-ratio-cell {
+  font-variant-numeric: tabular-nums;
+}
+
+.worklog-project-ratio-cell span {
+  display: block;
+  margin-bottom: 5px;
+  color: color-mix(in srgb, var(--interactive-accent) 72%, var(--text-normal));
+  font-size: 12px;
+  font-weight: 760;
+}
+
+.worklog-project-ratio-bar {
+  display: block;
+  height: 5px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--interactive-accent) 72%, #dbe7ff);
+}
+
+.worklog-project-empty-cell {
+  height: 132px;
+  text-align: center;
+  color: var(--worklog-muted);
+}
+
 .worklog-pie-content {
   min-height: 0;
   height: 100%;
@@ -2025,6 +2204,10 @@ button.worklog-pie-legend-arrow:disabled {
   .worklog-pie-content {
     grid-template-columns: minmax(0, 1fr);
   }
+
+  .worklog-project-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 760px) {
@@ -2043,6 +2226,7 @@ button.worklog-pie-legend-arrow:disabled {
   }
 
   .worklog-stats,
+  .worklog-project-summary,
   .worklog-month-cards,
   .worklog-settings-config-grid {
     grid-template-columns: minmax(0, 1fr);

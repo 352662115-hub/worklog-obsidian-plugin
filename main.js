@@ -168,6 +168,7 @@ function normalizeTaskTemplates(templates, taskTypes = []) {
     return {
       id: clean(item.id) || makeId('tpl'),
       name: clean(item.name),
+      project: clean(item.project || item.projectName || item.belongingProject),
       category: categoryIds.has(category) ? category : (taskTypes[0] && taskTypes[0].id) || 'feature',
       issue: clean(item.issue),
       plannedHours: toNumber(item.plannedHours ?? item.planned),
@@ -296,6 +297,7 @@ function defaultData(month, settings = DEFAULT_SETTINGS) {
     return {
       id,
       name: task.name,
+      project: task.project || '',
       category: task.category,
       issue: task.issue || '',
       plannedHours: toNumber(task.plannedHours),
@@ -325,6 +327,7 @@ function normalizeData(raw, month, settings = DEFAULT_SETTINGS) {
   data.tasks = (data.tasks || []).map((task) => ({
     id: clean(task.id),
     name: clean(task.name),
+    project: clean(task.project || task.projectName || task.belongingProject),
     category: clean(task.category || 'feature'),
     issue: clean(task.issue),
     plannedHours: toNumber(task.plannedHours ?? task.planned),
@@ -517,6 +520,80 @@ function yearSummary(items) {
   });
 }
 
+function projectRowsForScope(items, year, month = '') {
+  const selectedYear = clean(year);
+  const selectedMonth = isValidMonth(month) && month.startsWith(`${selectedYear}-`) ? month : '';
+  const projects = new Map();
+  let totalPlanned = 0;
+  let totalActual = 0;
+  let totalTasks = 0;
+  let totalLogs = 0;
+
+  const ensureProject = (name) => {
+    const project = clean(name) || '未归属项目';
+    if (!projects.has(project)) {
+      projects.set(project, {
+        project,
+        months: new Set(),
+        categories: new Set(),
+        issues: new Set(),
+        planned: 0,
+        actual: 0,
+        tasks: 0,
+        logs: 0
+      });
+    }
+    return projects.get(project);
+  };
+
+  (items || [])
+    .filter((data) => clean(data && data.month).startsWith(selectedYear) && (!selectedMonth || data.month === selectedMonth))
+    .forEach((data) => {
+      const d = deriveWorklogData(data);
+      data.tasks.forEach((task) => {
+        const row = ensureProject(task.project);
+        const category = d.categoryById.get(task.category);
+        row.months.add(data.month);
+        row.planned += toNumber(task.plannedHours);
+        row.tasks += 1;
+        if (category) row.categories.add(category.label);
+        else if (clean(task.category)) row.categories.add(clean(task.category));
+        if (clean(task.issue)) row.issues.add(clean(task.issue));
+        totalPlanned += toNumber(task.plannedHours);
+        totalTasks += 1;
+      });
+      data.logs.forEach((log) => {
+        const task = d.tasksById.get(log.taskId);
+        const row = ensureProject(task ? task.project : '未归属项目');
+        const hours = toNumber(log.hours);
+        row.months.add(data.month);
+        row.actual += hours;
+        row.logs += 1;
+        if (task) {
+          const category = d.categoryById.get(task.category);
+          if (category) row.categories.add(category.label);
+          else if (clean(task.category)) row.categories.add(clean(task.category));
+          if (clean(task.issue)) row.issues.add(clean(task.issue));
+        }
+        if (clean(log.issueLink)) row.issues.add(clean(log.issueLink));
+        totalActual += hours;
+        totalLogs += 1;
+      });
+    });
+
+  const rows = Array.from(projects.values())
+    .map((row) => Object.assign({}, row, {
+      months: Array.from(row.months).sort(),
+      categories: Array.from(row.categories).sort((a, b) => a.localeCompare(b)),
+      issues: Array.from(row.issues).sort((a, b) => a.localeCompare(b)),
+      plannedRatio: totalPlanned > 0 ? (row.planned / totalPlanned) * 100 : 0,
+      actualRatio: totalActual > 0 ? (row.actual / totalActual) * 100 : 0
+    }))
+    .sort((a, b) => b.planned - a.planned || b.actual - a.actual || a.project.localeCompare(b.project));
+
+  return { rows, totalPlanned, totalActual, totalTasks, totalLogs, month: selectedMonth };
+}
+
 function statusLabel(status) {
   const item = STATUSES.find((candidate) => candidate.id === clean(status));
   return item ? item.label : clean(status) || '-';
@@ -569,6 +646,7 @@ function buildMonthNoteContent(data, dataPath) {
     return [
       task.id,
       task.name,
+      task.project || '-',
       category ? category.label : task.category,
       task.issue || '-',
       `${formatHours(task.plannedHours)}h`,
@@ -588,7 +666,7 @@ function buildMonthNoteContent(data, dataPath) {
     ];
   });
   const updatedAt = clean(data.updatedAt || new Date().toISOString());
-  return `---\ntype: worklog-month\nmonth: ${data.month}\nsystem: Worklog Plugin\ndata: ${dataPath}\nupdated: ${updatedAt}\n---\n\n# ${data.month} 工时工作台\n\n> 本笔记由 Worklog 插件根据本地 JSON 自动生成，工时工作台中的看板、日历、任务和明细会同步到这里。\n\n## 月度数据看板\n\n${markdownTable(['指标', '数值'], statsRows)}\n## 分类工时\n\n${markdownTable(['类型', '计划工时', '实际工时', '差异'], categoryRows, '暂无任务数据。')}\n## 日历\n\n${markdownTable(['一', '二', '三', '四', '五', '六', '日'], calendarRows, '暂无日历数据。')}\n## 任务清单\n\n${markdownTable(['任务 ID', '任务', '类型', 'issue', '计划', '实际', '状态'], taskRows, '暂无任务数据。')}\n## 每日工时明细\n\n${markdownTable(['日期', '任务 ID', '任务', '工时', '做了什么', 'issue'], logRows, '暂无工时记录。')}\n`;
+  return `---\ntype: worklog-month\nmonth: ${data.month}\nsystem: Worklog Plugin\ndata: ${dataPath}\nupdated: ${updatedAt}\n---\n\n# ${data.month} 工时工作台\n\n> 本笔记由 Worklog 插件根据本地 JSON 自动生成，工时工作台中的看板、日历、任务和明细会同步到这里。\n\n## 月度数据看板\n\n${markdownTable(['指标', '数值'], statsRows)}\n## 分类工时\n\n${markdownTable(['类型', '计划工时', '实际工时', '差异'], categoryRows, '暂无任务数据。')}\n## 日历\n\n${markdownTable(['一', '二', '三', '四', '五', '六', '日'], calendarRows, '暂无日历数据。')}\n## 任务清单\n\n${markdownTable(['任务 ID', '任务', '归属项目', '类型', 'issue', '计划', '实际', '状态'], taskRows, '暂无任务数据。')}\n## 每日工时明细\n\n${markdownTable(['日期', '任务 ID', '任务', '工时', '做了什么', 'issue'], logRows, '暂无工时记录。')}\n`;
 }
 
 class WorklogMonthPickerModal extends Modal {
@@ -1380,7 +1458,12 @@ class WorklogView extends ItemView {
       row.appendChild(this.el('span', 'worklog-task-dot'));
       const main = this.el('div', 'worklog-task-main');
       main.appendChild(this.el('strong', '', task.name));
-      const meta = this.el('span', '', `${category ? category.label : task.category}${task.issue ? ` · ${task.issue}` : ''}`);
+      const metaParts = [
+        task.project ? `项目：${task.project}` : '',
+        category ? category.label : task.category,
+        task.issue ? `issue：${task.issue}` : ''
+      ].filter(Boolean);
+      const meta = this.el('span', '', metaParts.join(' · '));
       main.appendChild(meta);
       row.appendChild(main);
       const plannedHours = this.el('span', 'worklog-task-hours', `${formatHours(task.plannedHours)}h`);
@@ -1463,6 +1546,7 @@ class YearDashboardView extends ItemView {
     this.plugin = plugin;
     this.data = [];
     this.selectedYear = currentMonth().slice(0, 4);
+    this.projectScopeMonth = '';
   }
 
   getViewType() {
@@ -1480,12 +1564,14 @@ class YearDashboardView extends ItemView {
   async setState(state, result) {
     await super.setState(state, result);
     const year = clean(state && state.year);
+    const projectScopeMonth = clean(state && state.projectScopeMonth);
     this.selectedYear = /^(20\d{2})$/.test(year) ? year : currentMonth().slice(0, 4);
+    this.projectScopeMonth = isValidMonth(projectScopeMonth) && projectScopeMonth.startsWith(`${this.selectedYear}-`) ? projectScopeMonth : '';
     await this.load();
   }
 
   getState() {
-    return Object.assign({}, super.getState(), { year: this.selectedYear });
+    return Object.assign({}, super.getState(), { year: this.selectedYear, projectScopeMonth: this.projectScopeMonth });
   }
 
   async onOpen() {
@@ -1508,6 +1594,10 @@ class YearDashboardView extends ItemView {
     const button = this.el('button', `worklog-button ${className || ''}`.trim(), text);
     button.addEventListener('click', onClick);
     return button;
+  }
+
+  td(text, className = '') {
+    return this.el('td', className, text);
   }
 
   render() {
@@ -1547,6 +1637,7 @@ class YearDashboardView extends ItemView {
     body.appendChild(this.renderMonthlyLineChart(summary));
     body.appendChild(this.renderTaskTypePie(summary));
     section.appendChild(body);
+    section.appendChild(this.renderProjectStats(summary));
     section.appendChild(this.renderMonthCards(summary));
     return section;
   }
@@ -1733,6 +1824,86 @@ class YearDashboardView extends ItemView {
     item.appendChild(this.el('span', 'label', label));
     item.appendChild(this.el('strong', '', value));
     if (desc) item.appendChild(this.el('small', '', desc));
+    return item;
+  }
+
+  renderProjectStats(summary) {
+    if (this.projectScopeMonth && !summary.months.some((month) => month.month === this.projectScopeMonth)) {
+      this.projectScopeMonth = '';
+    }
+    const scope = projectRowsForScope(this.data, summary.year, this.projectScopeMonth);
+    const panel = this.el('section', 'worklog-card worklog-project-panel');
+    const head = this.el('div', 'worklog-card-head worklog-project-head');
+    const titleWrap = this.el('div', 'worklog-project-title');
+    titleWrap.appendChild(this.el('h3', '', '项目统计'));
+    titleWrap.appendChild(this.el('span', 'worklog-badge', scope.month ? `${Number(scope.month.slice(5, 7))} 月` : '全年'));
+    head.appendChild(titleWrap);
+    const controls = this.el('div', 'worklog-project-controls');
+    const select = this.el('select', 'worklog-project-scope-select');
+    select.appendChild(new Option('全年', ''));
+    summary.months.forEach((month) => select.appendChild(new Option(`${Number(month.month.slice(5, 7))} 月`, month.month)));
+    select.value = this.projectScopeMonth;
+    select.setAttribute('aria-label', '项目统计筛选月份');
+    select.addEventListener('change', () => {
+      this.projectScopeMonth = select.value;
+      this.render();
+    });
+    controls.appendChild(select);
+    head.appendChild(controls);
+    panel.appendChild(head);
+
+    const stats = this.el('div', 'worklog-project-summary');
+    stats.appendChild(this.projectSummaryItem('项目', `${scope.rows.length} 个`));
+    stats.appendChild(this.projectSummaryItem('计划', `${formatHours(scope.totalPlanned)}h`));
+    stats.appendChild(this.projectSummaryItem('实际', `${formatHours(scope.totalActual)}h`));
+    stats.appendChild(this.projectSummaryItem('任务', `${scope.totalTasks} 个`));
+    panel.appendChild(stats);
+
+    const tableWrap = this.el('div', 'worklog-project-table-wrap');
+    const table = this.el('table', 'worklog-table worklog-project-table');
+    table.innerHTML = '<thead><tr><th>#</th><th>项目名称</th><th>项目类型</th><th>关联 issue</th><th>计划</th><th>实际</th><th>占比</th><th>任务</th></tr></thead>';
+    const body = this.el('tbody');
+    scope.rows.forEach((row, index) => {
+      const tr = this.el('tr');
+      tr.appendChild(this.td(String(index + 1), 'worklog-project-index'));
+      const nameCell = this.td('', 'worklog-project-name-cell');
+      const nameWrap = this.el('div', 'worklog-project-name-text');
+      const name = this.el('strong', '', row.project);
+      const meta = this.el('span', '', row.months.length > 1 ? `${row.months.length} 个月` : (row.months[0] || '-'));
+      nameWrap.appendChild(name);
+      nameWrap.appendChild(meta);
+      nameCell.appendChild(nameWrap);
+      tr.appendChild(nameCell);
+      tr.appendChild(this.td(row.categories.length ? row.categories.slice(0, 3).join('、') : '-'));
+      tr.appendChild(this.td(row.issues.length ? row.issues.slice(0, 3).join('、') : '-'));
+      tr.appendChild(this.td(`${formatHours(row.planned)}h`, 'worklog-number-cell'));
+      tr.appendChild(this.td(`${formatHours(row.actual)}h`, 'worklog-number-cell'));
+      const ratioCell = this.td('', 'worklog-project-ratio-cell');
+      ratioCell.appendChild(this.el('span', '', formatPercent(row.plannedRatio)));
+      const bar = this.el('i', 'worklog-project-ratio-bar');
+      bar.style.width = `${Math.max(4, Math.min(100, row.plannedRatio))}%`;
+      ratioCell.appendChild(bar);
+      tr.appendChild(ratioCell);
+      tr.appendChild(this.td(`${row.tasks} 个`, 'worklog-number-cell'));
+      body.appendChild(tr);
+    });
+    if (!scope.rows.length) {
+      const emptyRow = this.el('tr');
+      const cell = this.td('暂无项目统计数据', 'worklog-project-empty-cell');
+      cell.colSpan = 8;
+      emptyRow.appendChild(cell);
+      body.appendChild(emptyRow);
+    }
+    table.appendChild(body);
+    tableWrap.appendChild(table);
+    panel.appendChild(tableWrap);
+    return panel;
+  }
+
+  projectSummaryItem(label, value) {
+    const item = this.el('div', 'worklog-project-summary-item');
+    item.appendChild(this.el('span', '', label));
+    item.appendChild(this.el('strong', '', value));
     return item;
   }
 
@@ -1957,6 +2128,7 @@ class TaskModal extends Modal {
     addModalTitleBadge(this.modalEl, '默认模板');
     const form = this.contentEl;
     const name = this.addInput('任务名称');
+    const project = this.addInput('归属项目');
     const category = this.addSelect('任务类型', categoriesForData(this.view.data).filter((item) => item.enabled !== false));
     const planned = this.addInput('计划工时', '8', 'number');
     const issue = this.addInput('关联 issue');
@@ -1971,7 +2143,7 @@ class TaskModal extends Modal {
       if (!clean(issue.value)) return new Notice('关联 issue 不能为空');
       if (!category.value) return new Notice('请先在插件设置中启用至少一个任务类型');
       const taskId = nextTaskId(this.view.data.tasks, this.view.data.month, this.selectedDate || `${this.view.data.month}-01`);
-      const task = { id: taskId, name: clean(name.value), category: category.value, issue: clean(issue.value), plannedHours: toNumber(planned.value), status: 'doing' };
+      const task = { id: taskId, name: clean(name.value), project: clean(project.value), category: category.value, issue: clean(issue.value), plannedHours: toNumber(planned.value), status: 'doing' };
       if (task.plannedHours <= 0) return new Notice('计划工时必须大于 0');
       const logs = this.view.data.logs.slice();
       if (this.selectedDate) {
@@ -2064,7 +2236,7 @@ class LogModal extends Modal {
   addTaskSelect(value = '') {
     let select;
     new Setting(this.contentEl).setName('任务').addDropdown((dropdown) => {
-      this.view.data.tasks.forEach((task) => dropdown.addOption(task.id, `${task.id} | ${task.name}`));
+      this.view.data.tasks.forEach((task) => dropdown.addOption(task.id, `${task.id} | ${task.name}${task.project ? ` · ${task.project}` : ''}`));
       select = dropdown.selectEl;
       select.value = value || select.value;
     });
