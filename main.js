@@ -1220,10 +1220,7 @@ class WorklogView extends ItemView {
     const actions = this.el('div', 'worklog-actions');
     actions.appendChild(this.iconButton('新增任务', 'plus', '', () => new TaskModal(this.app, this, this.selectedDate).open()));
     actions.appendChild(this.iconButton('新增工时', 'plus', 'primary', () => new LogModal(this.app, this, this.selectedDate).open()));
-    actions.appendChild(this.button('同步月度笔记', 'success', async () => {
-      await this.plugin.syncMonthNote(this.data);
-      new Notice('已同步月度笔记');
-    }));
+    actions.appendChild(this.button('选择年月', '', async () => new JumpWorklogMonthModal(this.app, this.plugin, await this.plugin.dataMonths()).open()));
     header.appendChild(actions);
     main.appendChild(header);
 
@@ -1277,7 +1274,7 @@ class WorklogView extends ItemView {
       panel.appendChild(this.el('div', 'worklog-empty', '暂无任务数据'));
       return panel;
     }
-    const max = chartScaleMax(Math.max(1, ...rows.map((row) => Math.max(row.planned, row.actual))));
+    const max = Math.max(1, ...rows.map((row) => Math.max(row.planned, row.actual)));
     const ticks = chartTicks(max);
     const chart = this.el('div', 'worklog-chart');
     const yAxis = this.el('div', 'worklog-chart-y-axis');
@@ -1291,6 +1288,7 @@ class WorklogView extends ItemView {
     ticks.forEach(() => grid.appendChild(this.el('span', 'worklog-chart-grid-line')));
     body.appendChild(grid);
     const groups = this.el('div', 'worklog-chart-groups');
+    groups.style.setProperty('--worklog-chart-columns', String(rows.length));
     const tooltip = this.el('div', 'worklog-chart-tooltip');
     rows.forEach((row) => {
       const group = this.el('div', 'worklog-chart-group');
@@ -1604,6 +1602,11 @@ class YearDashboardView extends ItemView {
     this.contentEl.empty();
     const root = this.contentEl.createDiv({ cls: 'worklog-plugin-view worklog-year-view' });
     const summaries = yearSummary(this.data);
+    const summaryYears = summaries.map((summary) => summary.year);
+    if (summaryYears.length && !summaryYears.includes(this.selectedYear)) {
+      this.selectedYear = summaryYears[0];
+      this.projectScopeMonth = '';
+    }
     const visibleSummary = summaries.find((summary) => summary.year === this.selectedYear) || null;
     const titleText = this.selectedYear ? `${this.selectedYear} 年度工时看板` : '年度工时看板';
     const visibleSummaries = visibleSummary ? [visibleSummary] : [];
@@ -1616,7 +1619,7 @@ class YearDashboardView extends ItemView {
     header.appendChild(title);
     const actions = this.el('div', 'worklog-actions');
     actions.appendChild(this.button('刷新', '', () => this.load()));
-    actions.appendChild(this.button('打开当前月', 'primary', () => this.plugin.openView(currentMonth())));
+    actions.appendChild(this.button('选择年度', '', async () => new JumpWorklogYearModal(this.app, this.plugin, await this.plugin.availableYears()).open()));
     header.appendChild(actions);
     main.appendChild(header);
 
@@ -1926,8 +1929,8 @@ class YearDashboardView extends ItemView {
     const max = chartScaleMax(Math.max(1, ...values));
     const width = 720;
     const height = 300;
-    const pad = { left: 52, right: 24, top: 28, bottom: 72 };
-    const xLabelY = height - 30;
+    const pad = { left: 52, right: 24, top: 40, bottom: 56 };
+    const xLabelY = height - 50;
     const x = (index) => pad.left + (index / 11) * (width - pad.left - pad.right);
     const y = (value) => pad.top + (1 - value / max) * (height - pad.top - pad.bottom);
     const pointsFor = (key) => months.map((month, index) => ({ x: x(index), y: y(month[key]), value: month[key], month: month.month }));
@@ -1936,6 +1939,7 @@ class YearDashboardView extends ItemView {
     const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
     svg.setAttribute('class', 'worklog-line-chart');
     svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+    svg.setAttribute('preserveAspectRatio', 'none');
     svg.setAttribute('role', 'img');
     svg.setAttribute('aria-label', `${summary.year} 每月计划工时和实际工时折线图`);
     const highlightLayer = this.svgEl('g', { class: 'worklog-line-highlight-layer' });
@@ -1978,7 +1982,7 @@ class YearDashboardView extends ItemView {
     svg.appendChild(this.svgEl('path', { d: this.linePath(planned), class: 'worklog-line-path planned' }));
     svg.appendChild(this.svgEl('path', { d: this.linePath(actual), class: 'worklog-line-path actual' }));
     months.forEach((month, index) => {
-      const label = this.svgEl('text', { x: x(index), y: xLabelY, class: 'worklog-line-x-label', 'text-anchor': 'end', transform: `rotate(-55 ${x(index)} ${xLabelY})` });
+      const label = this.svgEl('text', { x: x(index), y: xLabelY, class: 'worklog-line-x-label', 'text-anchor': 'end', transform: `rotate(-45 ${x(index)} ${xLabelY})` });
       label.textContent = month.month;
       svg.appendChild(label);
     });
@@ -2084,18 +2088,37 @@ class YearDashboardView extends ItemView {
 
   renderMonthCards(summary) {
     const wrap = this.el('div', 'worklog-month-cards');
-    summary.months.slice(-3).forEach((month) => {
+    const byMonth = new Map(summary.months.map((month) => [month.month, month]));
+    Array.from({ length: 12 }, (_, index) => {
+      const monthId = `${summary.year}-${pad2(index + 1)}`;
+      return byMonth.get(monthId) || {
+        month: monthId,
+        plannedHours: 0,
+        actualHours: 0,
+        logs: 0,
+        tasks: 0
+      };
+    }).forEach((month) => {
+      const hasData = month.tasks > 0 || month.logs > 0 || month.plannedHours > 0 || month.actualHours > 0;
       const card = this.el('div', 'worklog-month-card');
+      if (!hasData) card.classList.add('is-empty');
       const monthName = `${Number(month.month.slice(5, 7))} 月`;
       card.appendChild(this.el('strong', '', monthName));
-      card.appendChild(this.el('span', 'worklog-badge', `${formatHours(month.actualHours)}h`));
+      card.appendChild(this.el('span', `worklog-badge ${hasData ? '' : 'muted'}`.trim(), hasData ? `${formatHours(month.actualHours)}h` : '暂无数据'));
       const preview = this.el('div', 'worklog-mini-bars');
-      const planned = Math.max(1, month.plannedHours);
-      const actual = Math.max(0, month.actualHours);
-      preview.appendChild(this.miniBar('blue', Math.min(100, (actual / planned) * 88)));
-      preview.appendChild(this.miniBar('teal', Math.min(86, 42 + (month.logs || 0) * 3)));
-      preview.appendChild(this.miniBar('amber', Math.min(82, 45 + (month.tasks || 0) * 5)));
-      preview.appendChild(this.miniBar('muted', 52));
+      if (hasData) {
+        const planned = Math.max(1, month.plannedHours);
+        const actual = Math.max(0, month.actualHours);
+        preview.appendChild(this.miniBar('blue', Math.min(100, (actual / planned) * 88)));
+        preview.appendChild(this.miniBar('teal', Math.min(86, 42 + (month.logs || 0) * 3)));
+        preview.appendChild(this.miniBar('amber', Math.min(82, 45 + (month.tasks || 0) * 5)));
+        preview.appendChild(this.miniBar('muted', 52));
+      } else {
+        preview.appendChild(this.miniBar('muted', 22));
+        preview.appendChild(this.miniBar('muted', 36));
+        preview.appendChild(this.miniBar('muted', 28));
+        preview.appendChild(this.miniBar('muted', 18));
+      }
       card.appendChild(preview);
       wrap.appendChild(card);
     });
