@@ -440,8 +440,7 @@
   z-index: 1;
   height: 100%;
   display: grid;
-  grid-auto-flow: column;
-  grid-auto-columns: minmax(86px, 1fr);
+  grid-template-columns: repeat(var(--worklog-chart-columns, 1), minmax(0, 1fr));
   gap: 14px;
 }
 
@@ -859,12 +858,18 @@ button.worklog-pie-legend-arrow:disabled {
 
 .worklog-line-panel {
   display: grid;
-  align-content: start;
+  grid-template-rows: auto minmax(0, 1fr);
+  align-content: stretch;
+  height: 100%;
+  min-height: 0;
 }
 
 .worklog-line-visual {
   position: relative;
   width: 100%;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .worklog-line-chart {
@@ -964,15 +969,16 @@ button.worklog-pie-legend-arrow:disabled {
   }
 
   .worklog-chart {
-    grid-template-columns: 40px minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .worklog-chart-body {
-    min-width: 560px;
+    min-width: 0;
   }
 
   .worklog-chart-groups {
-    grid-auto-columns: minmax(76px, 1fr);
+    grid-template-columns: repeat(var(--worklog-chart-columns, 1), minmax(0, 1fr));
+    gap: clamp(4px, 0.9vw, 10px);
   }
 
   .worklog-calendar .empty,
@@ -1037,6 +1043,7 @@ button.worklog-pie-legend-arrow:disabled {
   justify-content: flex-end;
   gap: 8px;
   flex-wrap: wrap;
+  position: relative;
 }
 
 .worklog-button {
@@ -1055,6 +1062,12 @@ button.worklog-pie-legend-arrow:disabled {
   cursor: pointer;
   white-space: nowrap;
   transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease;
+}
+
+.worklog-actions .worklog-button {
+  min-height: 36px;
+  height: 36px;
+  box-sizing: border-box;
 }
 
 .worklog-button:hover,
@@ -1295,12 +1308,15 @@ button.worklog-pie-legend-arrow:disabled {
   height: 100%;
   box-sizing: border-box;
   display: grid;
-  align-items: center;
-  align-content: center;
+  grid-template-rows: minmax(0, 1fr);
+  align-items: stretch;
+  align-content: stretch;
+  justify-items: stretch;
   border: 0;
   border-radius: 0;
   background: transparent;
-  padding: 12px 14px 18px;
+  padding: 8px 10px 10px;
+  overflow: hidden;
 }
 
 .worklog-chart-legend {
@@ -1327,11 +1343,14 @@ button.worklog-pie-legend-arrow:disabled {
 }
 
 .worklog-chart {
-  height: 286px;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
   max-height: 100%;
-  grid-template-columns: 0 minmax(0, 1fr);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 0;
-  overflow-x: auto;
+  overflow: hidden;
 }
 
 .worklog-chart-y-axis {
@@ -1339,12 +1358,15 @@ button.worklog-pie-legend-arrow:disabled {
 }
 
 .worklog-chart-body {
-  min-width: 560px;
-  padding-top: 16px;
+  min-width: 0;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  padding-top: 10px;
 }
 
 .worklog-chart-grid {
-  inset: 16px 0 24px;
+  inset: 10px 0 22px;
 }
 
 .worklog-chart-grid-line {
@@ -1352,27 +1374,65 @@ button.worklog-pie-legend-arrow:disabled {
 }
 
 .worklog-chart-groups {
-  grid-auto-columns: minmax(78px, 1fr);
-  gap: 12px;
+  min-height: 0;
+  height: 100%;
+  width: 100%;
+  display: grid;
+  grid-template-columns: repeat(var(--worklog-chart-columns, 1), minmax(0, 1fr));
+  align-items: stretch;
+  gap: clamp(4px, 0.8vw, 10px);
 }
 
 .worklog-chart-bars {
-  height: 236px;
-  gap: 6px;
+  height: calc(100% - 24px);
+  gap: clamp(4px, 0.8vw, 10px);
 }
 
 .worklog-chart-bar {
-  width: 18px;
+  width: clamp(14px, 3vw, 32px);
   border-radius: 5px 5px 2px 2px;
 }
 
 .worklog-chart-label {
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
   color: var(--worklog-muted);
   font-size: 11px;
   font-weight: 650;
-  line-height: 24px;
+  line-height: 1.15;
+  min-height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: center;
+  padding: 0 2px;
+}
+
+.worklog-chart-group {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  min-width: 0;
+}
+
+.worklog-chart-focus-area.is-pair {
+  width: 100%;
+}
+
+.worklog-chart-focus-area.is-planned-only,
+.worklog-chart-focus-area.is-actual-only {
+  width: 100%;
+}
+
+.worklog-chart-focus-area.is-planned-only {
+  transform: translateX(calc(-50% - min(9px, 1vw)));
+}
+
+.worklog-chart-focus-area.is-actual-only {
+  transform: translateX(calc(-50% + min(9px, 1vw)));
 }
 
 .worklog-task-list {
@@ -1905,14 +1965,22 @@ button.worklog-pie-legend-arrow:disabled {
 .worklog-line-panel {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
+  height: 100%;
+  min-height: 0;
 }
 
 .worklog-line-visual {
+  position: relative;
+  height: 100%;
   min-height: 0;
-  padding: 12px 14px 6px;
+  box-sizing: border-box;
+  padding: 6px 12px 8px;
+  overflow: hidden;
 }
 
 .worklog-line-chart {
+  display: block;
+  width: 100%;
   height: 100%;
   min-height: 0;
 }
@@ -1932,7 +2000,7 @@ button.worklog-pie-legend-arrow:disabled {
 
 .worklog-month-cards {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 14px;
 }
 
@@ -1952,6 +2020,14 @@ button.worklog-pie-legend-arrow:disabled {
   color: var(--worklog-heading);
   font-size: 16px;
   font-weight: 760;
+}
+
+.worklog-month-card.is-empty {
+  background: color-mix(in srgb, var(--worklog-panel) 70%, var(--background-secondary));
+}
+
+.worklog-month-card.is-empty strong {
+  color: var(--worklog-muted);
 }
 
 .worklog-mini-bars {
