@@ -575,7 +575,6 @@ function projectRowsForScope(items, year, month = '') {
           else if (clean(task.category)) row.categories.add(clean(task.category));
           if (clean(task.issue)) row.issues.add(clean(task.issue));
         }
-        if (clean(log.issueLink)) row.issues.add(clean(log.issueLink));
         totalActual += hours;
         totalLogs += 1;
       });
@@ -644,7 +643,6 @@ function buildMonthNoteContent(data, dataPath) {
   const taskRows = data.tasks.map((task) => {
     const category = d.categoryById.get(task.category);
     return [
-      task.id,
       task.name,
       task.project || '-',
       category ? category.label : task.category,
@@ -658,7 +656,6 @@ function buildMonthNoteContent(data, dataPath) {
     const task = d.tasksById.get(log.taskId);
     return [
       log.date,
-      log.taskId,
       task ? task.name : '未找到任务',
       `${formatHours(log.hours)}h`,
       log.work,
@@ -666,7 +663,7 @@ function buildMonthNoteContent(data, dataPath) {
     ];
   });
   const updatedAt = clean(data.updatedAt || new Date().toISOString());
-  return `---\ntype: worklog-month\nmonth: ${data.month}\nsystem: Worklog Plugin\ndata: ${dataPath}\nupdated: ${updatedAt}\n---\n\n# ${data.month} 工时工作台\n\n> 本笔记由 Worklog 插件根据本地 JSON 自动生成，工时工作台中的看板、日历、任务和明细会同步到这里。\n\n## 月度数据看板\n\n${markdownTable(['指标', '数值'], statsRows)}\n## 分类工时\n\n${markdownTable(['类型', '计划工时', '实际工时', '差异'], categoryRows, '暂无任务数据。')}\n## 日历\n\n${markdownTable(['一', '二', '三', '四', '五', '六', '日'], calendarRows, '暂无日历数据。')}\n## 任务清单\n\n${markdownTable(['任务 ID', '任务', '归属项目', '类型', 'issue', '计划', '实际', '状态'], taskRows, '暂无任务数据。')}\n## 每日工时明细\n\n${markdownTable(['日期', '任务 ID', '任务', '工时', '做了什么', 'issue'], logRows, '暂无工时记录。')}\n`;
+  return `---\ntype: worklog-month\nmonth: ${data.month}\nsystem: Worklog Plugin\ndata: ${dataPath}\nupdated: ${updatedAt}\n---\n\n# ${data.month} 工时工作台\n\n> 本笔记由 Worklog 插件根据本地 JSON 自动生成，工时工作台中的看板、日历、任务和明细会同步到这里。\n\n## 月度数据看板\n\n${markdownTable(['指标', '数值'], statsRows)}\n## 分类工时\n\n${markdownTable(['类型', '计划工时', '实际工时', '差异'], categoryRows, '暂无任务数据。')}\n## 日历\n\n${markdownTable(['一', '二', '三', '四', '五', '六', '日'], calendarRows, '暂无日历数据。')}\n## 任务清单\n\n${markdownTable(['任务', '归属项目', '类型', 'issue', '计划', '实际', '状态'], taskRows, '暂无任务数据。')}\n## 每日工时明细\n\n${markdownTable(['日期', '任务', '工时', '做了什么', 'issue'], logRows, '暂无工时记录。')}\n`;
 }
 
 class WorklogMonthPickerModal extends Modal {
@@ -1218,7 +1215,7 @@ class WorklogView extends ItemView {
     title.appendChild(this.el('p', '', '任务、工时、日历和统计在同一个月度视图里完成。'));
     header.appendChild(title);
     const actions = this.el('div', 'worklog-actions');
-    actions.appendChild(this.iconButton('新增任务', 'plus', '', () => new TaskModal(this.app, this, this.selectedDate).open()));
+    actions.appendChild(this.iconButton('新增任务', 'plus', '', () => new TaskModal(this.app, this).open()));
     actions.appendChild(this.iconButton('新增工时', 'plus', 'primary', () => new LogModal(this.app, this, this.selectedDate).open()));
     actions.appendChild(this.button('选择年月', '', async () => new JumpWorklogMonthModal(this.app, this.plugin, await this.plugin.dataMonths()).open()));
     header.appendChild(actions);
@@ -2139,43 +2136,31 @@ class YearDashboardView extends ItemView {
 }
 
 class TaskModal extends Modal {
-  constructor(app, view, selectedDate) {
+  constructor(app, view) {
     super(app);
     this.view = view;
-    this.selectedDate = selectedDate || '';
   }
 
   onOpen() {
     this.modalEl.addClass('worklog-modal');
     this.setTitle('新增任务');
-    addModalTitleBadge(this.modalEl, '默认模板');
     const form = this.contentEl;
     const name = this.addInput('任务名称');
     const project = this.addInput('归属项目');
     const category = this.addSelect('任务类型', categoriesForData(this.view.data).filter((item) => item.enabled !== false));
     const planned = this.addInput('计划工时', '8', 'number');
     const issue = this.addInput('关联 issue');
-    const id = nextTaskId(this.view.data.tasks, this.view.data.month, this.selectedDate || `${this.view.data.month}-01`);
-    new Setting(form).setName('任务 ID').setDesc(id);
-    const hours = this.selectedDate ? this.addInput('当天工时', '1', 'number') : null;
-    const work = this.selectedDate ? this.addTextArea('当天做了什么') : null;
     new Setting(form)
       .addButton((button) => button.setButtonText('取消').onClick(() => this.close()))
       .addButton((button) => button.setButtonText('保存任务').setCta().onClick(async () => {
       if (!clean(name.value)) return new Notice('任务名称不能为空');
       if (!clean(issue.value)) return new Notice('关联 issue 不能为空');
       if (!category.value) return new Notice('请先在插件设置中启用至少一个任务类型');
-      const taskId = nextTaskId(this.view.data.tasks, this.view.data.month, this.selectedDate || `${this.view.data.month}-01`);
+      const taskId = nextTaskId(this.view.data.tasks, this.view.data.month, `${this.view.data.month}-01`);
       const task = { id: taskId, name: clean(name.value), project: clean(project.value), category: category.value, issue: clean(issue.value), plannedHours: toNumber(planned.value), status: 'doing' };
       if (task.plannedHours <= 0) return new Notice('计划工时必须大于 0');
-      const logs = this.view.data.logs.slice();
-      if (this.selectedDate) {
-        if (hasLogForTaskDate(logs, taskId, this.selectedDate)) return new Notice('当天已登记过该任务 ID');
-        if (!clean(work.value)) return new Notice('当天工作内容不能为空');
-        logs.push({ id: `log-${Date.now().toString(36)}`, date: this.selectedDate, taskId, hours: toNumber(hours.value), work: clean(work.value), issueLink: '' });
-      }
-      await this.view.save(Object.assign({}, this.view.data, { tasks: this.view.data.tasks.concat(task), logs }));
-      new Notice(`已新增任务：${taskId}`);
+      await this.view.save(Object.assign({}, this.view.data, { tasks: this.view.data.tasks.concat(task) }));
+      new Notice(`已新增任务：${task.name}`);
       this.close();
     }));
   }
@@ -2234,7 +2219,7 @@ class LogModal extends Modal {
       const task = this.view.data.tasks.find((item) => item.id === taskSelect.value);
       if (!task) return new Notice('请选择任务');
       if (!clean(date.value).startsWith(this.view.data.month)) return new Notice(`日期必须属于当前月 ${this.view.data.month}`);
-      if (hasLogForTaskDate(this.view.data.logs, task.id, date.value, this.editingLog?.id || '')) return new Notice(`当天已登记过该任务 ID：${task.id}`);
+      if (hasLogForTaskDate(this.view.data.logs, task.id, date.value, this.editingLog?.id || '')) return new Notice(`当天已登记过该任务：${task.name}`);
       const category = categoriesForData(this.view.data).find((item) => item.id === task.category);
       if (category && category.requiresLogIssue && !clean(issue.value)) return new Notice('该任务类型必须填写关联 issue');
       if (!clean(work.value)) return new Notice('工作内容不能为空');
@@ -2259,7 +2244,7 @@ class LogModal extends Modal {
   addTaskSelect(value = '') {
     let select;
     new Setting(this.contentEl).setName('任务').addDropdown((dropdown) => {
-      this.view.data.tasks.forEach((task) => dropdown.addOption(task.id, `${task.id} | ${task.name}${task.project ? ` · ${task.project}` : ''}`));
+      this.view.data.tasks.forEach((task) => dropdown.addOption(task.id, `${task.name}${task.project ? ` · ${task.project}` : ''}`));
       select = dropdown.selectEl;
       select.value = value || select.value;
     });

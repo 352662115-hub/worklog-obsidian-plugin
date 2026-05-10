@@ -2056,10 +2056,15 @@ button.worklog-pie-legend-arrow:disabled {
   border-radius: 8px;
   border: 1px solid color-mix(in srgb, var(--background-modifier-border) 82%, #cbd5e1);
   box-shadow: 0 24px 60px rgb(15 23 42 / 24%);
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100vh - 48px);
+  max-height: calc(100dvh - 48px);
   overflow: hidden;
 }
 
 .worklog-modal .modal-title {
+  flex: 0 0 auto;
   margin: 0 -18px 8px;
   padding: 18px 18px 14px;
   border-bottom: 1px solid color-mix(in srgb, var(--background-modifier-border) 82%, #cbd5e1);
@@ -2089,7 +2094,11 @@ button.worklog-pie-legend-arrow:disabled {
 .worklog-modal .modal-content {
   display: grid;
   gap: 0;
-  padding-bottom: 16px;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 2px 4px 0 2px;
+  scrollbar-gutter: stable;
 }
 
 .worklog-modal .setting-item {
@@ -2097,6 +2106,7 @@ button.worklog-pie-legend-arrow:disabled {
   align-items: stretch;
   gap: 7px;
   border-top: 0;
+  margin: 0 2px;
   padding: 10px 0;
 }
 
@@ -2115,13 +2125,31 @@ button.worklog-pie-legend-arrow:disabled {
 .worklog-modal .setting-item-control {
   width: 100%;
   justify-content: stretch;
+  min-width: 0;
+}
+
+.worklog-modal .setting-item-control > * {
+  min-width: 0;
 }
 
 .worklog-modal .setting-item:last-child .setting-item-info {
   display: none;
 }
 
+.worklog-modal .setting-item:last-child {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  grid-column: 1 / -1;
+  margin: 2px -4px 0 -2px;
+  padding: 12px 4px 0 2px;
+  border-top: 1px solid color-mix(in srgb, var(--background-modifier-border) 82%, #cbd5e1);
+  background: var(--background-primary);
+  box-shadow: none;
+}
+
 .worklog-modal .setting-item:last-child .setting-item-control {
+  flex-wrap: wrap;
   justify-content: flex-end;
   gap: 8px;
 }
@@ -2136,9 +2164,17 @@ button.worklog-pie-legend-arrow:disabled {
 .worklog-modal input,
 .worklog-modal textarea,
 .worklog-modal select {
+  box-sizing: border-box;
   width: 100%;
   min-height: 38px;
   border-radius: 6px;
+}
+
+.worklog-modal input:focus,
+.worklog-modal textarea:focus,
+.worklog-modal select:focus {
+  outline: 2px solid color-mix(in srgb, var(--interactive-accent) 55%, transparent);
+  outline-offset: 1px;
 }
 
 .worklog-modal textarea {
