@@ -1,6 +1,6 @@
 {
   "worklogFolder": "worklog",
-  "dataFolder": ".obsidian/plugins/worklog/data",
+  "dataFolder": "",
   "createMonthlyNote": false,
   "taskTypes": [],
   "defaultTaskTemplates": []

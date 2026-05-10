@@ -3,9 +3,10 @@ const { Plugin, ItemView, Notice, Modal, Setting, PluginSettingTab, setIcon } = 
 const VIEW_TYPE = 'worklog-view';
 const YEAR_VIEW_TYPE = 'worklog-year-view';
 const CONFIG_FILE_NAME = 'config.json';
+const DATA_FOLDER_NAME = 'data';
 const DEFAULT_SETTINGS = {
   worklogFolder: 'worklog',
-  dataFolder: '.obsidian/plugins/worklog/data',
+  dataFolder: '',
   createMonthlyNote: false,
   taskTypes: [],
   defaultTaskTemplates: []
@@ -184,7 +185,7 @@ function normalizeSettings(settings) {
   const defaultTaskTemplates = normalizeTaskTemplates(settings.defaultTaskTemplates, taskTypes);
   return {
     worklogFolder: clean(settings.worklogFolder) || DEFAULT_SETTINGS.worklogFolder,
-    dataFolder: clean(settings.dataFolder) || DEFAULT_SETTINGS.dataFolder,
+    dataFolder: clean(settings.dataFolder),
     createMonthlyNote: settings.createMonthlyNote === true,
     taskTypes,
     defaultTaskTemplates
@@ -841,6 +842,14 @@ class WorklogPlugin extends Plugin {
     return `${this.manifest.dir}/${CONFIG_FILE_NAME}`;
   }
 
+  defaultDataFolder() {
+    return `${this.manifest.dir}/${DATA_FOLDER_NAME}`;
+  }
+
+  dataFolder() {
+    return clean(this.settings.dataFolder) || this.defaultDataFolder();
+  }
+
   async loadSettings() {
     const path = this.configPath();
     let settings = {};
@@ -861,28 +870,28 @@ class WorklogPlugin extends Plugin {
 
   dataPath(month) {
     const targetMonth = isValidMonth(month) ? month : currentMonth();
-    return `${this.settings.dataFolder}/${targetMonth.slice(0, 4)}/${targetMonth}.json`;
+    return `${this.dataFolder()}/${targetMonth.slice(0, 4)}/${targetMonth}.json`;
   }
 
   legacyDataPath(month) {
     const targetMonth = isValidMonth(month) ? month : currentMonth();
-    return `${this.settings.dataFolder}/${targetMonth}.json`;
+    return `${this.dataFolder()}/${targetMonth}.json`;
   }
 
   monthDataFolder(month) {
     const targetMonth = isValidMonth(month) ? month : currentMonth();
-    return `${this.settings.dataFolder}/${targetMonth.slice(0, 4)}`;
+    return `${this.dataFolder()}/${targetMonth.slice(0, 4)}`;
   }
 
   monthFromDataPath(path) {
-    const prefix = escapeRegExp(clean(this.settings.dataFolder));
+    const prefix = escapeRegExp(this.dataFolder());
     const match = clean(path).match(new RegExp(`^${prefix}/(?:(20\\d{2})/)?(20\\d{2}-\\d{2})\\.json$`));
     if (!match) return '';
     return match[2];
   }
 
   isLegacyDataPath(path) {
-    const prefix = escapeRegExp(clean(this.settings.dataFolder));
+    const prefix = escapeRegExp(this.dataFolder());
     return new RegExp(`^${prefix}/20\\d{2}-\\d{2}\\.json$`).test(clean(path));
   }
 
@@ -967,7 +976,7 @@ class WorklogPlugin extends Plugin {
   }
 
   async dataFiles() {
-    const files = await this.adapterFiles(this.settings.dataFolder);
+    const files = await this.adapterFiles(this.dataFolder());
     const byMonth = new Map();
     files.forEach((path) => {
       const month = this.monthFromDataPath(path);
@@ -2345,8 +2354,11 @@ class WorklogSettingTab extends PluginSettingTab {
     }));
     const dataPanel = configGrid.createDiv({ cls: 'worklog-settings-panel worklog-settings-config-panel' });
     dataPanel.createEl('h3', { text: '数据目录' });
-    new Setting(dataPanel).setName('保存位置').addText((text) => text.setValue(this.plugin.settings.dataFolder).onChange(async (value) => {
-      this.plugin.settings.dataFolder = clean(value) || DEFAULT_SETTINGS.dataFolder;
+    new Setting(dataPanel)
+      .setName('保存位置')
+      .setDesc(`留空时默认保存到 ${this.plugin.defaultDataFolder()}`)
+      .addText((text) => text.setPlaceholder(this.plugin.defaultDataFolder()).setValue(this.plugin.settings.dataFolder).onChange(async (value) => {
+      this.plugin.settings.dataFolder = clean(value);
       await this.plugin.saveSettings();
     }));
   }
