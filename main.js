@@ -124,6 +124,12 @@ function formatSignedHours(value) {
   return `${sign}${formatHours(Math.abs(n))}`;
 }
 
+function formatRemainingHours(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n === 0) return '0';
+  return n < 0 ? `-${formatHours(Math.abs(n))}` : formatHours(n);
+}
+
 function formatPercent(value) {
   const n = Number(value);
   if (!Number.isFinite(n) || n <= 0) return '0%';
@@ -1470,10 +1476,17 @@ class WorklogView extends ItemView {
       const meta = this.el('span', '', metaParts.join(' · '));
       main.appendChild(meta);
       row.appendChild(main);
-      const plannedHours = this.el('span', 'worklog-task-hours', `${formatHours(task.plannedHours)}h`);
-      plannedHours.setAttribute('title', '计划工时');
-      plannedHours.setAttribute('aria-label', `计划工时 ${formatHours(task.plannedHours)} 小时`);
-      row.appendChild(plannedHours);
+      const actualHours = d.actualByTask.get(task.id) || 0;
+      const remainingHours = toNumber(task.plannedHours) - toNumber(actualHours);
+      const remainingText = formatRemainingHours(remainingHours);
+      const hours = this.el('span', 'worklog-task-hours', `${remainingText}h`);
+      const hoursTooltip = this.el('span', 'worklog-task-hours-tooltip', `计划工时${formatHours(task.plannedHours)}h-实际总工时${formatHours(actualHours)}h`);
+      const hoursTooltipId = `worklog-task-hours-${clean(task.id).replace(/[^a-z0-9_-]/gi, '-') || index}`;
+      hoursTooltip.id = hoursTooltipId;
+      hours.tabIndex = 0;
+      hours.appendChild(hoursTooltip);
+      hours.setAttribute('aria-describedby', hoursTooltipId);
+      row.appendChild(hours);
       const select = document.createElement('select');
       select.className = 'worklog-status-select';
       STATUSES.forEach((status) => select.appendChild(new Option(status.label, status.id)));
@@ -2221,7 +2234,9 @@ class LogModal extends Modal {
     const hours = this.addInput('工时', editing ? String(this.editingLog.hours || '') : '1', 'number');
     const taskSelect = this.addTaskSelect(this.editingLog?.taskId || '');
     const work = this.addTextArea('今天具体做了什么', this.editingLog?.work || '');
-    const issue = this.addInput('关联 issue', this.editingLog?.issueLink || '');
+    const selectedTask = this.view.data.tasks.find((item) => item.id === taskSelect.value);
+    const displayIssue = this.editingLog ? (this.editingLog.issueLink || (selectedTask ? selectedTask.issue : '')) : '';
+    const issue = this.addInput('关联 issue', displayIssue);
     new Setting(this.contentEl)
       .addButton((button) => button.setButtonText('取消').onClick(() => this.close()))
       .addButton((button) => button.setButtonText(editing ? '保存修改' : '保存工时').setCta().onClick(async () => {
