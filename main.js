@@ -670,7 +670,7 @@ function buildMonthNoteContent(data, dataPath) {
     ];
   });
   const updatedAt = clean(data.updatedAt || new Date().toISOString());
-  return `---\ntype: worklog-month\nmonth: ${data.month}\nsystem: Worklog Plugin\ndata: ${dataPath}\nupdated: ${updatedAt}\n---\n\n# ${data.month} 工时工作台\n\n> 本笔记由 Worklog 插件根据本地 JSON 自动生成，工时工作台中的看板、日历、任务和明细会同步到这里。\n\n## 月度数据看板\n\n${markdownTable(['指标', '数值'], statsRows)}\n## 分类工时\n\n${markdownTable(['类型', '计划工时', '实际工时', '差异'], categoryRows, '暂无任务数据。')}\n## 日历\n\n${markdownTable(['一', '二', '三', '四', '五', '六', '日'], calendarRows, '暂无日历数据。')}\n## 任务清单\n\n${markdownTable(['任务', '归属项目', '类型', 'issue', '计划', '实际', '状态'], taskRows, '暂无任务数据。')}\n## 每日工时明细\n\n${markdownTable(['日期', '任务', '工时', '做了什么', 'issue'], logRows, '暂无工时记录。')}\n`;
+  return `---\ntype: worklog-month\nmonth: ${data.month}\nsystem: Worklog Plugin\ndata: ${dataPath}\nupdated: ${updatedAt}\n---\n\n# ${data.month} 工时工作台\n\n> 本笔记由 Worklog 插件根据本地 JSON 自动生成，工时工作台中的看板、日历、任务和明细会同步到这里。\n\n## 月度数据看板\n\n${markdownTable(['指标', '数值'], statsRows)}\n## 分类工时\n\n${markdownTable(['类型', '计划工时', '实际工时', '差异'], categoryRows, '暂无任务数据。')}\n## 日历\n\n${markdownTable(['一', '二', '三', '四', '五', '六', '日'], calendarRows, '暂无日历数据。')}\n## 任务清单\n\n${markdownTable(['任务', '归属项目', '类型', 'issue', '计划', '实际', '状态'], taskRows, '暂无任务数据。')}\n## 每日工时明细\n\n${markdownTable(['日期', '任务', '工时', '工作内容', 'issue'], logRows, '暂无工时记录。')}\n`;
 }
 
 class WorklogMonthPickerModal extends Modal {
@@ -1520,7 +1520,7 @@ class WorklogView extends ItemView {
     section.appendChild(head);
     const tableWrap = this.el('div', 'worklog-table-scroll');
     const table = this.el('table', 'worklog-table worklog-log-table');
-    table.innerHTML = '<thead><tr><th>日期</th><th>任务</th><th>工时</th><th>做了什么</th><th>issue</th><th>操作</th></tr></thead>';
+    table.innerHTML = '<thead><tr><th>日期</th><th>任务</th><th>工时</th><th>工作内容</th><th>issue</th><th>操作</th></tr></thead>';
     const body = this.el('tbody');
     const rows = this.data.logs
       .map((log, index) => ({ log, index }))
@@ -2233,7 +2233,7 @@ class LogModal extends Modal {
     const date = this.addInput('日期', this.editingLog?.date || this.selectedDate, 'date');
     const hours = this.addInput('工时', editing ? String(this.editingLog.hours || '') : '1', 'number');
     const taskSelect = this.addTaskSelect(this.editingLog?.taskId || '');
-    const work = this.addTextArea('今天具体做了什么', this.editingLog?.work || '');
+    const work = this.addTextArea('工作内容', this.editingLog?.work || '');
     const selectedTask = this.view.data.tasks.find((item) => item.id === taskSelect.value);
     const displayIssue = this.editingLog ? (this.editingLog.issueLink || (selectedTask ? selectedTask.issue : '')) : '';
     const issue = this.addInput('关联 issue', displayIssue);
