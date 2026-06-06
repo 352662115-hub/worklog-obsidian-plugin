@@ -7,10 +7,58 @@ const DATA_FOLDER_NAME = 'data';
 const DEFAULT_SETTINGS = {
   worklogFolder: 'worklog',
   dataFolder: '',
-  createMonthlyNote: false,
+  createMonthlyReport: false,
   taskTypes: [],
   defaultTaskTemplates: []
 };
+
+const DEFAULT_MONTHLY_REPORT_TEMPLATE = `---
+type: worklog-monthly-report
+month: {{month}}
+system: Worklog Plugin
+data: {{dataPath}}
+created: {{createdAt}}
+---
+
+# {{monthTitle}}月度终结报告
+
+> 本报告由 Worklog 插件在每月第一个工作日读取上月数据创建。报告只读取数据，不会修改源 JSON；报告创建后不会被插件覆盖，可以直接在本文继续补充复盘内容。
+
+## 本月概览
+
+{{overviewTable}}
+## 任务状态
+
+{{statusTable}}
+## 任务类型
+
+{{categoryTable}}
+## 项目汇总
+
+{{projectTable}}
+## 已完成任务
+
+{{completedTaskTable}}
+## 延续任务
+
+{{carryTaskTable}}
+## 工时明细
+
+{{logTable}}
+## 月度复盘
+
+### 完成亮点
+
+-
+
+### 问题与风险
+
+-
+
+### 下月计划
+
+-
+`;
 
 const CATEGORIES = [
   { id: 'feature', label: '3D开发', color: '#4a73c9', enabled: true, requiresLogIssue: false, sort: 0 },
@@ -75,6 +123,30 @@ function currentYear() {
   return todayIso().slice(0, 4);
 }
 
+function monthFromDate(date) {
+  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}`;
+}
+
+function previousMonthFromDate(date) {
+  return monthFromDate(new Date(date.getFullYear(), date.getMonth() - 1, 1));
+}
+
+function firstBusinessDayIso(month) {
+  if (!isValidMonth(month)) return '';
+  const [year, monthNumber] = month.split('-').map(Number);
+  const date = new Date(year, monthNumber - 1, 1);
+  while ([0, 6].includes(date.getDay())) date.setDate(date.getDate() + 1);
+  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
+}
+
+function isFirstBusinessDay(date = new Date()) {
+  return todayIsoFromDate(date) === firstBusinessDayIso(monthFromDate(date));
+}
+
+function todayIsoFromDate(date) {
+  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
+}
+
 function formatMonthTitle(month) {
   const match = clean(month).match(/^(20\d{2})-(\d{2})$/);
   if (!match) return clean(month);
@@ -105,6 +177,16 @@ function monthOptions() {
 
 function escapeRegExp(value) {
   return clean(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function normalizeFolderPath(value) {
+  return clean(value).replace(/\\/g, '/').replace(/\/+/g, '/').replace(/^\/+|\/+$/g, '');
+}
+
+function parentPath(path) {
+  const parts = clean(path).split('/').filter(Boolean);
+  parts.pop();
+  return parts.join('/');
 }
 
 function toNumber(value) {
@@ -190,9 +272,9 @@ function normalizeSettings(settings) {
   const taskTypes = normalizeTaskTypes(settings.taskTypes);
   const defaultTaskTemplates = normalizeTaskTemplates(settings.defaultTaskTemplates, taskTypes);
   return {
-    worklogFolder: clean(settings.worklogFolder) || DEFAULT_SETTINGS.worklogFolder,
-    dataFolder: clean(settings.dataFolder),
-    createMonthlyNote: settings.createMonthlyNote === true,
+    worklogFolder: normalizeFolderPath(settings.worklogFolder) || DEFAULT_SETTINGS.worklogFolder,
+    dataFolder: normalizeFolderPath(settings.dataFolder),
+    createMonthlyReport: settings.createMonthlyReport === true || settings.createMonthlyNote === true,
     taskTypes,
     defaultTaskTemplates
   };
@@ -400,6 +482,9 @@ function deriveWorklogData(data) {
   });
   const totalPlanned = data.tasks.reduce((sum, task) => sum + toNumber(task.plannedHours), 0);
   const totalActual = data.logs.reduce((sum, log) => sum + toNumber(log.hours), 0);
+  const totalTasks = data.tasks.length;
+  const statusCounts = taskStatusCounts(data.tasks);
+  const completedTasks = statusCounts.done || 0;
   return {
     tasksById,
     actualByTask,
@@ -410,15 +495,32 @@ function deriveWorklogData(data) {
     taskCategories,
     categoryById,
     totalPlanned,
-    totalActual
+    totalActual,
+    totalTasks,
+    completedTasks,
+    statusCounts
   };
 }
 
-function completionPercent(planned, actual) {
-  const p = toNumber(planned);
-  const a = toNumber(actual);
-  if (p <= 0) return a > 0 ? 100 : 0;
-  return Math.min(999, Math.round((a / p) * 100));
+function taskStatusCounts(tasks) {
+  const counts = Object.fromEntries(STATUSES.map((status) => [status.id, 0]));
+  (tasks || []).forEach((task) => {
+    const status = clean(task.status || 'doing') || 'doing';
+    if (Object.prototype.hasOwnProperty.call(counts, status)) counts[status] += 1;
+  });
+  return counts;
+}
+
+function statusCountText(statusCounts) {
+  const counts = statusCounts || {};
+  return STATUSES.map((status) => `${status.label} ${toNumber(counts[status.id])}`).join(' · ');
+}
+
+function completionPercent(completed, total) {
+  const done = Math.max(0, toNumber(completed));
+  const count = Math.max(0, toNumber(total));
+  if (count <= 0) return 0;
+  return Math.min(100, Math.round((done / count) * 100));
 }
 
 function addModalTitleBadge(modalEl, text) {
@@ -472,6 +574,8 @@ function yearSummary(items) {
         totalActual: 0,
         totalLogs: 0,
         totalTasks: 0,
+        completedTasks: 0,
+        statusCounts: taskStatusCounts([]),
         taskIds: new Set(),
         categories: new Map()
       });
@@ -505,6 +609,10 @@ function yearSummary(items) {
     summary.totalActual += d.totalActual;
     summary.totalLogs += data.logs.length;
     summary.totalTasks += data.tasks.length;
+    summary.completedTasks += d.completedTasks;
+    STATUSES.forEach((status) => {
+      summary.statusCounts[status.id] += d.statusCounts[status.id] || 0;
+    });
     summary.months.push({
       month: data.month,
       plannedHours: d.totalPlanned,
@@ -619,46 +727,61 @@ function markdownTable(headers, rows, emptyText = '暂无数据。') {
   return `${[headerLine, separator].concat(rowLines).join('\n')}\n`;
 }
 
-function buildMonthNoteContent(data, dataPath) {
+function buildMonthlyReportContent(data, dataPath, template = DEFAULT_MONTHLY_REPORT_TEMPLATE) {
+  const context = buildMonthlyReportContext(data, dataPath);
+  const source = typeof template === 'string' && template.trim() ? template : DEFAULT_MONTHLY_REPORT_TEMPLATE;
+  return source.replace(/\{\{([a-zA-Z0-9_]+)\}\}/g, (_, key) => (
+    Object.prototype.hasOwnProperty.call(context, key) ? context[key] : ''
+  ));
+}
+
+function buildMonthlyReportContext(data, dataPath) {
   const d = deriveWorklogData(data);
   const diff = d.totalActual - d.totalPlanned;
-  const statsRows = [
+  const overviewRows = [
     ['计划工时', `${formatHours(d.totalPlanned)}h`],
     ['实际工时', `${formatHours(d.totalActual)}h`],
     ['差异', `${formatSignedHours(diff)}h`],
-    ['任务数', String(data.tasks.length)],
+    ['完成率', `${completionPercent(d.completedTasks, d.totalTasks)}%`],
+    ['任务数', String(d.totalTasks)],
+    ['任务类型', `${d.taskCategories.length} 类`],
     ['记录数', String(data.logs.length)]
   ];
+  const statusRows = STATUSES.map((status) => [
+    status.label,
+    String(d.statusCounts[status.id] || 0)
+  ]);
   const categoryRows = taskTypeRowsForData(data, d).map((category) => [
     category.label,
     `${formatHours(category.planned)}h`,
     `${formatHours(category.actual)}h`,
-    `${formatSignedHours(category.actual - category.planned)}h`
+    `${formatSignedHours(category.actual - category.planned)}h`,
+    `${category.tasks} 个`
   ]);
-  const completed = new Set(data.dailyStatus.completedDates || []);
-  const calendarCells = buildCalendarCells(data.month, d.daily, d.dailyCount);
-  const calendarRows = [];
-  for (let i = 0; i < calendarCells.length; i += 7) {
-    calendarRows.push(calendarCells.slice(i, i + 7).map((cell) => {
-      if (!cell) return '';
-      const lines = [String(cell.day)];
-      if (cell.count) lines.push(`${formatHours(cell.hours)}h`, `${cell.count}条记录`);
-      lines.push(completed.has(cell.date) ? '已完成' : '未完成');
-      return lines.join('<br>');
-    }));
-  }
-  const taskRows = data.tasks.map((task) => {
+  const projectScope = projectRowsForScope([data], data.month.slice(0, 4), data.month);
+  const projectRows = projectScope.rows.map((row) => [
+    row.project,
+    row.categories.join('、') || '-',
+    row.issues.slice(0, 3).join('、') || '-',
+    `${formatHours(row.planned)}h`,
+    `${formatHours(row.actual)}h`,
+    `${row.tasks} 个`
+  ]);
+  const taskRow = (task) => {
     const category = d.categoryById.get(task.category);
     return [
       task.name,
       task.project || '-',
       category ? category.label : task.category,
-      task.issue || '-',
       `${formatHours(task.plannedHours)}h`,
       `${formatHours(d.actualByTask.get(task.id) || 0)}h`,
       statusLabel(task.status)
     ];
-  });
+  };
+  const completedTaskRows = data.tasks.filter((task) => clean(task.status || 'doing') === 'done').map(taskRow);
+  const carryTaskRows = data.tasks
+    .filter((task) => !['done', 'cancelled'].includes(clean(task.status || 'doing')))
+    .map(taskRow);
   const logRows = data.logs.map((log) => {
     const task = d.tasksById.get(log.taskId);
     return [
@@ -669,8 +792,19 @@ function buildMonthNoteContent(data, dataPath) {
       log.issueLink || (task ? task.issue : '') || '-'
     ];
   });
-  const updatedAt = clean(data.updatedAt || new Date().toISOString());
-  return `---\ntype: worklog-month\nmonth: ${data.month}\nsystem: Worklog Plugin\ndata: ${dataPath}\nupdated: ${updatedAt}\n---\n\n# ${data.month} 工时工作台\n\n> 本笔记由 Worklog 插件根据本地 JSON 自动生成，工时工作台中的看板、日历、任务和明细会同步到这里。\n\n## 月度数据看板\n\n${markdownTable(['指标', '数值'], statsRows)}\n## 分类工时\n\n${markdownTable(['类型', '计划工时', '实际工时', '差异'], categoryRows, '暂无任务数据。')}\n## 日历\n\n${markdownTable(['一', '二', '三', '四', '五', '六', '日'], calendarRows, '暂无日历数据。')}\n## 任务清单\n\n${markdownTable(['任务', '归属项目', '类型', 'issue', '计划', '实际', '状态'], taskRows, '暂无任务数据。')}\n## 每日工时明细\n\n${markdownTable(['日期', '任务', '工时', '工作内容', 'issue'], logRows, '暂无工时记录。')}\n`;
+  return {
+    month: data.month,
+    monthTitle: formatMonthTitle(data.month),
+    dataPath,
+    createdAt: new Date().toISOString(),
+    overviewTable: markdownTable(['指标', '数值'], overviewRows),
+    statusTable: markdownTable(['状态', '任务数'], statusRows),
+    categoryTable: markdownTable(['类型', '计划工时', '实际工时', '差异', '任务数'], categoryRows, '暂无任务类型数据。'),
+    projectTable: markdownTable(['项目', '任务类型', '关联 issue', '计划工时', '实际工时', '任务数'], projectRows, '暂无项目数据。'),
+    completedTaskTable: markdownTable(['任务', '归属项目', '类型', '计划工时', '实际工时', '状态'], completedTaskRows, '暂无已完成任务。'),
+    carryTaskTable: markdownTable(['任务', '归属项目', '类型', '计划工时', '实际工时', '状态'], carryTaskRows, '暂无延续任务。'),
+    logTable: markdownTable(['日期', '任务', '工时', '工作内容', 'issue'], logRows, '暂无工时记录。')
+  };
 }
 
 class WorklogMonthPickerModal extends Modal {
@@ -837,6 +971,10 @@ class WorklogPlugin extends Plugin {
     this.addCommand({ id: 'jump-worklog-year', name: '跳转到年度工时看板', callback: async () => new JumpWorklogYearModal(this.app, this, await this.availableYears()).open() });
     this.addCommand({ id: 'open-worklog-year-dashboard', name: '打开年度工时看板', callback: () => this.openYearDashboard() });
     this.addSettingTab(new WorklogSettingTab(this.app, this));
+    await this.maybeCreateMonthlyReport();
+    if (typeof window !== 'undefined') {
+      this.registerInterval(window.setInterval(() => this.maybeCreateMonthlyReport(), 60 * 60 * 1000));
+    }
   }
 
   onunload() {
@@ -853,7 +991,11 @@ class WorklogPlugin extends Plugin {
   }
 
   dataFolder() {
-    return clean(this.settings.dataFolder) || this.defaultDataFolder();
+    return normalizeFolderPath(this.settings.dataFolder) || this.defaultDataFolder();
+  }
+
+  reportFolder(value = this.settings.worklogFolder) {
+    return normalizeFolderPath(value) || DEFAULT_SETTINGS.worklogFolder;
   }
 
   async loadSettings() {
@@ -930,8 +1072,12 @@ class WorklogPlugin extends Plugin {
     this.refreshYearDashboards();
   }
 
-  notePath(month) {
-    return `${this.settings.worklogFolder}/${month}.md`;
+  monthlyReportPath(month) {
+    return `${this.reportFolder()}/${month} 月度终结报告.md`;
+  }
+
+  monthlyReportTemplatePath() {
+    return `${this.reportFolder()}/月度终结报告模板.md`;
   }
 
   async ensureFolder(folder) {
@@ -1010,6 +1156,49 @@ class WorklogPlugin extends Plugin {
     return result;
   }
 
+  async copyFolderFiles(sourceFolder, targetFolder, filter = () => true) {
+    const source = clean(sourceFolder);
+    const target = clean(targetFolder);
+    const result = { copied: 0, skipped: 0 };
+    if (!source || !target || source === target || !(await this.app.vault.adapter.exists(source))) return result;
+    const files = (await this.adapterFiles(source)).filter(filter);
+    const prefix = source.endsWith('/') ? source : `${source}/`;
+    for (const file of files) {
+      const relative = file.startsWith(prefix) ? file.slice(prefix.length) : file.split('/').pop();
+      const nextPath = `${target}/${relative}`;
+      if (await this.app.vault.adapter.exists(nextPath)) {
+        result.skipped += 1;
+        continue;
+      }
+      const folder = parentPath(nextPath);
+      if (folder) await this.ensureAdapterFolder(folder);
+      await this.app.vault.adapter.write(nextPath, await this.app.vault.adapter.read(file));
+      result.copied += 1;
+    }
+    return result;
+  }
+
+  async updateDataFolder(nextValue) {
+    const previousFolder = this.dataFolder();
+    const nextSetting = normalizeFolderPath(nextValue);
+    const nextFolder = nextSetting || this.defaultDataFolder();
+    const migrated = await this.copyFolderFiles(previousFolder, nextFolder, (path) => path.endsWith('.json'));
+    this.settings.dataFolder = nextSetting;
+    await this.saveSettings();
+    this.refreshOpenViews();
+    new Notice(`已保存数据目录，迁移 ${migrated.copied} 个文件${migrated.skipped ? `，跳过 ${migrated.skipped} 个已存在文件` : ''}`);
+  }
+
+  async updateReportFolder(nextValue) {
+    const previousFolder = this.reportFolder();
+    const nextFolder = this.reportFolder(nextValue);
+    const migrated = await this.copyFolderFiles(previousFolder, nextFolder, (path) => path.endsWith('.md'));
+    this.settings.worklogFolder = nextFolder;
+    await this.saveSettings();
+    await this.ensureMonthlyReportTemplate();
+    new Notice(`已保存月度终结报告目录，迁移 ${migrated.copied} 个文件${migrated.skipped ? `，跳过 ${migrated.skipped} 个已存在文件` : ''}`);
+  }
+
   async readExistingData(path) {
     const month = this.monthFromDataPath(path || '');
     if (!isValidMonth(month)) return null;
@@ -1037,33 +1226,59 @@ class WorklogPlugin extends Plugin {
     if (legacyPath !== path && await this.app.vault.adapter.exists(legacyPath)) {
       await this.removeLegacyDataFile(legacyPath);
     }
-    await this.maybeSyncMonthNote(next);
     this.refreshMonthViews(month);
     this.refreshYearDashboards();
     return next;
   }
 
-  shouldSyncMonthNote() {
-    return !!this.settings.createMonthlyNote;
+  shouldCreateMonthlyReport() {
+    return !!this.settings.createMonthlyReport;
   }
 
-  async maybeSyncMonthNote(data) {
-    if (!this.shouldSyncMonthNote()) return null;
-    return this.syncMonthNote(data);
+  monthlyReportTargetMonth(date = new Date()) {
+    return isFirstBusinessDay(date) ? previousMonthFromDate(date) : '';
   }
 
-  async syncMonthNote(data) {
-    const month = data.month || currentMonth();
-    await this.ensureFolder(this.settings.worklogFolder);
-    const path = this.notePath(month);
-    const content = buildMonthNoteContent(data, this.dataPath(month));
-    const file = this.app.vault.getAbstractFileByPath(path);
-    if (file) {
-      const current = await this.app.vault.read(file);
-      if (current !== content) await this.app.vault.modify(file, content);
-      return file;
+  async maybeCreateMonthlyReport(showNotice = false) {
+    if (!this.shouldCreateMonthlyReport()) return null;
+    await this.ensureMonthlyReportTemplate();
+    const month = this.monthlyReportTargetMonth();
+    if (!month) {
+      if (showNotice) new Notice('已开启月度终结报告；模板已创建，报告会在每月第一个工作日生成。');
+      return null;
     }
-    return this.app.vault.create(path, content);
+    return this.createMonthlyReport(month, showNotice);
+  }
+
+  async ensureMonthlyReportTemplate() {
+    await this.ensureFolder(this.reportFolder());
+    const path = this.monthlyReportTemplatePath();
+    const file = this.app.vault.getAbstractFileByPath(path);
+    if (file) return file;
+    return this.app.vault.create(path, DEFAULT_MONTHLY_REPORT_TEMPLATE);
+  }
+
+  async createMonthlyReport(month, showNotice = false) {
+    const targetMonth = isValidMonth(month) ? month : previousMonthFromDate(new Date());
+    await this.ensureFolder(this.reportFolder());
+    const templateFile = await this.ensureMonthlyReportTemplate();
+    const path = this.monthlyReportPath(targetMonth);
+    const existing = this.app.vault.getAbstractFileByPath(path);
+    if (existing) {
+      if (showNotice) new Notice(`${targetMonth} 月度终结报告已存在`);
+      return existing;
+    }
+    const data = await this.readData(targetMonth);
+    let template = DEFAULT_MONTHLY_REPORT_TEMPLATE;
+    try {
+      template = await this.app.vault.read(templateFile);
+    } catch (error) {
+      console.error('Worklog: failed to read monthly report template', error);
+    }
+    const content = buildMonthlyReportContent(data, this.dataPath(targetMonth), template);
+    const file = await this.app.vault.create(path, content);
+    if (showNotice) new Notice(`已创建 ${targetMonth} 月度终结报告`);
+    return file;
   }
 
   async removeLegacyDataFile(path) {
@@ -1082,8 +1297,7 @@ class WorklogPlugin extends Plugin {
       new Notice(`无效月份：${month}`);
       return;
     }
-    const data = await this.readData(month);
-    await this.maybeSyncMonthNote(data);
+    await this.readData(month);
     const leaf = this.app.workspace.getLeaf(false);
     await leaf.setViewState({ type: VIEW_TYPE, active: true, state: { month } });
     this.app.workspace.revealLeaf(leaf);
@@ -1094,8 +1308,7 @@ class WorklogPlugin extends Plugin {
       new Notice(`无效月份：${month}`);
       return;
     }
-    const data = await this.readData(month);
-    await this.maybeSyncMonthNote(data);
+    await this.readData(month);
     const leaf = this.app.workspace.getLeaf(false);
     await leaf.setViewState({ type: VIEW_TYPE, active: true, state: { month } });
     this.app.workspace.revealLeaf(leaf);
@@ -1169,7 +1382,6 @@ class WorklogView extends ItemView {
 
   async load() {
     this.data = await this.plugin.readData(this.month);
-    await this.plugin.maybeSyncMonthNote(this.data);
     this.render();
   }
 
@@ -1201,13 +1413,17 @@ class WorklogView extends ItemView {
     return button;
   }
 
-  actionIconButton(icon, label, className, onClick, disabled = false) {
+  actionIconButton(icon, label, className, onClick, disabled = false, showTooltip = true) {
     const button = this.el('button', `worklog-icon-button ${className || ''}`.trim());
     button.type = 'button';
-    button.setAttribute('aria-label', label);
-    button.setAttribute('title', label);
     button.disabled = disabled;
     setIcon(button, icon);
+    button.appendChild(this.el('span', 'worklog-visually-hidden', label));
+    if (showTooltip) {
+      const tooltip = this.el('span', 'worklog-action-tooltip', label);
+      tooltip.setAttribute('aria-hidden', 'true');
+      button.appendChild(tooltip);
+    }
     button.addEventListener('click', (event) => {
       if (button.disabled) return;
       onClick(event);
@@ -1248,12 +1464,11 @@ class WorklogView extends ItemView {
 
   renderDashboard(d) {
     const section = this.el('section', 'worklog-dashboard');
-    const diff = d.totalActual - d.totalPlanned;
     const stats = this.el('div', 'worklog-stats');
     stats.appendChild(this.stat('计划工时', `${formatHours(d.totalPlanned)}h`, `本月 ${this.data.tasks.length} 个任务`));
     stats.appendChild(this.stat('实际工时', `${formatHours(d.totalActual)}h`, `已记录 ${this.data.logs.length} 条工时`, 'actual'));
-    stats.appendChild(this.stat('完成率', `${completionPercent(d.totalPlanned, d.totalActual)}%`, diff === 0 ? '计划与实际一致' : `差异 ${formatSignedHours(diff)}h`, 'good'));
-    stats.appendChild(this.stat('任务类型', `${d.taskCategories.length}类`, '支持自定义颜色', 'type'));
+    stats.appendChild(this.stat('完成率', `${completionPercent(d.completedTasks, d.totalTasks)}%`, statusCountText(d.statusCounts), 'good'));
+    stats.appendChild(this.stat('任务统计', `${d.totalTasks} 个`, `总任务类型 ${d.taskCategories.length} 类`, 'type'));
     section.appendChild(stats);
     return section;
   }
@@ -1470,8 +1685,7 @@ class WorklogView extends ItemView {
       main.appendChild(this.el('strong', '', task.name));
       const metaParts = [
         task.project ? `项目：${task.project}` : '',
-        category ? category.label : task.category,
-        task.issue ? `issue：${task.issue}` : ''
+        category ? category.label : task.category
       ].filter(Boolean);
       const meta = this.el('span', '', metaParts.join(' · '));
       main.appendChild(meta);
@@ -1498,12 +1712,17 @@ class WorklogView extends ItemView {
       });
       row.appendChild(select);
       const refs = d.logCountByTask.get(task.id) || 0;
-      row.appendChild(this.actionIconButton('trash-2', refs > 0 ? '已有工时记录，不能删除' : '删除任务', 'danger subtle', async () => {
+      const actions = this.el('div', 'worklog-row-actions worklog-task-actions');
+      actions.appendChild(this.actionIconButton('pencil', '编辑任务', 'subtle', () => {
+        new TaskModal(this.app, this, task, index).open();
+      }, false, false));
+      actions.appendChild(this.actionIconButton('trash-2', refs > 0 ? '已有工时记录，不能删除' : '删除任务', 'danger subtle', async () => {
         await this.save(Object.assign({}, this.data, {
           tasks: this.data.tasks.filter((_, i) => i !== index),
           logs: this.data.logs.filter((log) => log.taskId !== task.id)
         }));
-      }, refs > 0));
+      }, refs > 0, false));
+      row.appendChild(actions);
       list.appendChild(row);
     });
     if (!this.data.tasks.length) list.appendChild(this.el('div', 'worklog-empty worklog-empty-compact', '暂无任务'));
@@ -1537,11 +1756,11 @@ class WorklogView extends ItemView {
       const actions = this.el('div', 'worklog-row-actions');
       actions.appendChild(this.actionIconButton('pencil', '编辑工时记录', 'subtle', () => {
         new LogModal(this.app, this, log.date, log).open();
-      }));
+      }, false, false));
       actions.appendChild(this.actionIconButton('trash-2', '删除工时记录', 'danger subtle', async () => {
         if (!confirm('删除这条工时记录？')) return;
         await this.save(Object.assign({}, this.data, { logs: this.data.logs.filter((_, i) => i !== index) }));
-      }));
+      }, false, false));
       actionTd.appendChild(actions);
       tr.appendChild(actionTd);
       body.appendChild(tr);
@@ -1666,12 +1885,11 @@ class YearDashboardView extends ItemView {
 
   renderSummaryStats(summary) {
     const panel = this.el('div', 'worklog-dashboard');
-    const diff = summary.totalActual - summary.totalPlanned;
     const stats = this.el('div', 'worklog-stats');
     stats.appendChild(this.summaryStat('计划工时', `${formatHours(summary.totalPlanned)}h`, `汇总 ${summary.months.length} 个月`));
     stats.appendChild(this.summaryStat('实际工时', `${formatHours(summary.totalActual)}h`, `记录 ${summary.totalLogs} 条`, 'actual'));
-    stats.appendChild(this.summaryStat('完成率', `${completionPercent(summary.totalPlanned, summary.totalActual)}%`, diff === 0 ? '计划与实际一致' : `差异 ${formatSignedHours(diff)}h`, 'good'));
-    stats.appendChild(this.summaryStat('任务类型', `${summary.categoryRows.length}类`, `任务 ${summary.totalTasks} 个`, 'type'));
+    stats.appendChild(this.summaryStat('完成率', `${completionPercent(summary.completedTasks, summary.totalTasks)}%`, statusCountText(summary.statusCounts), 'good'));
+    stats.appendChild(this.summaryStat('任务统计', `${summary.totalTasks} 个`, `总任务类型 ${summary.categoryRows.length} 类`, 'type'));
     panel.appendChild(stats);
     return panel;
   }
@@ -2158,31 +2376,49 @@ class YearDashboardView extends ItemView {
 }
 
 class TaskModal extends Modal {
-  constructor(app, view) {
+  constructor(app, view, editingTask = null, taskIndex = -1) {
     super(app);
     this.view = view;
+    this.editingTask = editingTask;
+    this.taskIndex = taskIndex;
   }
 
   onOpen() {
     this.modalEl.addClass('worklog-modal');
-    this.setTitle('新增任务');
+    const editing = !!this.editingTask;
+    this.setTitle(editing ? '编辑任务' : '新增任务');
     const form = this.contentEl;
-    const name = this.addInput('任务名称');
-    const project = this.addInput('归属项目');
-    const category = this.addSelect('任务类型', categoriesForData(this.view.data).filter((item) => item.enabled !== false));
-    const planned = this.addInput('计划工时', '8', 'number');
-    const issue = this.addInput('关联 issue');
+    const taskTypes = categoriesForData(this.view.data);
+    const categoryOptions = taskTypes.filter((item) => item.enabled !== false || (editing && item.id === this.editingTask.category));
+    const name = this.addInput('任务名称', this.editingTask?.name || '');
+    const project = this.addInput('归属项目', this.editingTask?.project || '');
+    const category = this.addSelect('任务类型', categoryOptions, this.editingTask?.category || '');
+    const planned = this.addInput('计划工时', editing ? String(this.editingTask.plannedHours || '') : '8', 'number');
+    const issue = this.addInput('关联 issue', this.editingTask?.issue || '');
     new Setting(form)
       .addButton((button) => button.setButtonText('取消').onClick(() => this.close()))
-      .addButton((button) => button.setButtonText('保存任务').setCta().onClick(async () => {
+      .addButton((button) => button.setButtonText(editing ? '保存修改' : '保存任务').setCta().onClick(async () => {
       if (!clean(name.value)) return new Notice('任务名称不能为空');
       if (!clean(issue.value)) return new Notice('关联 issue 不能为空');
       if (!category.value) return new Notice('请先在插件设置中启用至少一个任务类型');
-      const taskId = nextTaskId(this.view.data.tasks, this.view.data.month, `${this.view.data.month}-01`);
-      const task = { id: taskId, name: clean(name.value), project: clean(project.value), category: category.value, issue: clean(issue.value), plannedHours: toNumber(planned.value), status: 'doing' };
-      if (task.plannedHours <= 0) return new Notice('计划工时必须大于 0');
-      await this.view.save(Object.assign({}, this.view.data, { tasks: this.view.data.tasks.concat(task) }));
-      new Notice(`已新增任务：${task.name}`);
+      const patch = { name: clean(name.value), project: clean(project.value), category: category.value, issue: clean(issue.value), plannedHours: toNumber(planned.value) };
+      if (patch.plannedHours <= 0) return new Notice('计划工时必须大于 0');
+      if (editing) {
+        const tasks = this.view.data.tasks.slice();
+        const fallbackIndex = this.taskIndex >= 0 ? this.taskIndex : -1;
+        const taskIndex = tasks.findIndex((item) => item.id === this.editingTask.id);
+        const updateIndex = taskIndex >= 0 ? taskIndex : fallbackIndex;
+        if (updateIndex < 0 || !tasks[updateIndex]) return new Notice('未找到要编辑的任务');
+        const task = Object.assign({}, tasks[updateIndex], patch);
+        tasks[updateIndex] = task;
+        await this.view.save(Object.assign({}, this.view.data, { tasks }));
+        new Notice(`已更新任务：${task.name}`);
+      } else {
+        const taskId = nextTaskId(this.view.data.tasks, this.view.data.month, `${this.view.data.month}-01`);
+        const task = Object.assign({ id: taskId, status: 'doing' }, patch);
+        await this.view.save(Object.assign({}, this.view.data, { tasks: this.view.data.tasks.concat(task) }));
+        new Notice(`已新增任务：${task.name}`);
+      }
       this.close();
     }));
   }
@@ -2205,10 +2441,11 @@ class TaskModal extends Modal {
     return input;
   }
 
-  addSelect(label, options) {
+  addSelect(label, options, value = '') {
     let select;
     new Setting(this.contentEl).setName(label).addDropdown((dropdown) => {
       options.forEach((option) => dropdown.addOption(option.id, option.label));
+      if (value && options.some((option) => option.id === value)) dropdown.setValue(value);
       select = dropdown.selectEl;
     });
     return select;
@@ -2310,7 +2547,7 @@ class WorklogSettingTab extends PluginSettingTab {
     const header = shell.createDiv({ cls: 'worklog-settings-header' });
     const title = header.createDiv({ cls: 'worklog-title-block' });
     title.createEl('h2', { text: 'Worklog 插件设置' });
-    title.createEl('p', { text: '任务类型、默认任务模板、数据目录和月度笔记同步都可以在这里维护。' });
+    title.createEl('p', { text: '任务类型、默认任务模板、数据目录和月度终结报告都可以在这里维护。' });
     const headerActions = header.createDiv({ cls: 'worklog-settings-actions' });
     const addTypeButton = headerActions.createEl('button', { cls: 'worklog-button primary', text: '新增任务类型' });
     addTypeButton.addEventListener('click', async () => {
@@ -2343,39 +2580,50 @@ class WorklogSettingTab extends PluginSettingTab {
 
     const configGrid = shell.createDiv({ cls: 'worklog-settings-config-grid' });
     const syncPanel = configGrid.createDiv({ cls: 'worklog-settings-panel worklog-settings-config-panel' });
-    syncPanel.createEl('h3', { text: '月度笔记同步' });
+    syncPanel.createEl('h3', { text: '月度终结报告' });
     new Setting(syncPanel)
-      .setName('新建月度笔记并实时同步数据')
-      .setDesc('关闭时只创建和维护本地 JSON 数据；开启后会为打开的月份创建月度笔记，并在工时数据变化时同步看板、日历、任务和明细。')
-      .addToggle((toggle) => toggle.setValue(!!this.plugin.settings.createMonthlyNote).onChange(async (value) => {
-        this.plugin.settings.createMonthlyNote = value;
+      .setName('每月第一个工作日创建月度总结')
+      .setDesc('开启后会创建“月度终结报告模板.md”，并在每月第一个工作日读取上个月数据生成月度总结。')
+      .addToggle((toggle) => toggle.setValue(!!this.plugin.settings.createMonthlyReport).onChange(async (value) => {
+        this.plugin.settings.createMonthlyReport = value;
         await this.plugin.saveSettings();
         if (value) {
-          const leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE);
-          const months = leaves.map((leaf) => leaf.view && leaf.view.month).filter(isValidMonth);
-          const targetMonths = months.length ? Array.from(new Set(months)) : [currentMonth()];
-          for (const month of targetMonths) {
-            const data = await this.plugin.readData(month);
-            await this.plugin.syncMonthNote(data);
-          }
-          new Notice('已开启月度笔记实时同步');
+          await this.plugin.ensureMonthlyReportTemplate();
+          await this.plugin.maybeCreateMonthlyReport(true);
         } else {
-          new Notice('已关闭月度笔记实时同步');
+          new Notice('已关闭月度终结报告');
         }
       }));
-    new Setting(syncPanel).setName('月度笔记目录').addText((text) => text.setValue(this.plugin.settings.worklogFolder).onChange(async (value) => {
-      this.plugin.settings.worklogFolder = clean(value) || DEFAULT_SETTINGS.worklogFolder;
-      await this.plugin.saveSettings();
-    }));
+    let reportFolderValue = this.plugin.settings.worklogFolder;
+    new Setting(syncPanel)
+      .setClass('worklog-path-setting')
+      .setName('月度终结报告目录')
+      .setDesc('修改后点击“保存并迁移”，会把旧目录中的报告和模板复制到新目录；旧目录文件会保留。')
+      .addText((text) => text.setValue(reportFolderValue).onChange((value) => {
+        reportFolderValue = normalizeFolderPath(value) || DEFAULT_SETTINGS.worklogFolder;
+      }))
+      .addButton((button) => button
+        .setButtonText('保存并迁移')
+        .onClick(async () => {
+          await this.plugin.updateReportFolder(reportFolderValue);
+          this.display();
+        }));
     const dataPanel = configGrid.createDiv({ cls: 'worklog-settings-panel worklog-settings-config-panel' });
     dataPanel.createEl('h3', { text: '数据目录' });
+    let dataFolderValue = this.plugin.settings.dataFolder;
     new Setting(dataPanel)
+      .setClass('worklog-path-setting')
       .setName('保存位置')
-      .setDesc(`留空时默认保存到 ${this.plugin.defaultDataFolder()}`)
-      .addText((text) => text.setPlaceholder(this.plugin.defaultDataFolder()).setValue(this.plugin.settings.dataFolder).onChange(async (value) => {
-      this.plugin.settings.dataFolder = clean(value);
-      await this.plugin.saveSettings();
-    }));
+      .setDesc(`留空时默认保存到 ${this.plugin.defaultDataFolder()}；修改后点击“保存并迁移”，会把旧目录中的 JSON 数据复制到新目录，旧目录文件会保留。`)
+      .addText((text) => text.setPlaceholder(this.plugin.defaultDataFolder()).setValue(dataFolderValue).onChange((value) => {
+        dataFolderValue = normalizeFolderPath(value);
+      }))
+      .addButton((button) => button
+        .setButtonText('保存并迁移')
+        .onClick(async () => {
+          await this.plugin.updateDataFolder(dataFolderValue);
+          this.display();
+        }));
   }
 
   async addTaskTemplate() {
