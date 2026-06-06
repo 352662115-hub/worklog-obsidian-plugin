@@ -22,7 +22,7 @@ created: {{createdAt}}
 
 # {{monthTitle}}月度终结报告
 
-> 本报告由 Worklog 插件在每月第一个工作日读取上月数据创建。报告只读取数据，不会修改源 JSON；报告创建后不会被插件覆盖，可以直接在本文继续补充复盘内容。
+> 本报告由 Worklog 插件在每月 1 日读取上月数据创建。报告只读取数据，不会修改源 JSON；报告创建后不会被插件覆盖，可以直接在本文继续补充复盘内容。
 
 ## 本月概览
 
@@ -56,6 +56,48 @@ created: {{createdAt}}
 -
 
 ### 下月计划
+
+-
+`;
+
+const DEFAULT_ANNUAL_REPORT_TEMPLATE = `---
+type: worklog-annual-report
+year: {{year}}
+system: Worklog Plugin
+dataFolder: {{dataFolder}}
+created: {{createdAt}}
+---
+
+# {{year}} 年度终结报告
+
+> 本报告由 Worklog 插件在每年 1 月 1 日读取上一年度数据创建。报告只读取数据，不会修改源 JSON；报告创建后不会被插件覆盖，可以直接在本文继续补充复盘内容。
+
+## 年度概览
+
+{{overviewTable}}
+## 任务状态
+
+{{statusTable}}
+## 任务统计
+
+{{categoryTable}}
+## 项目汇总
+
+{{projectTable}}
+## 月度明细
+
+{{monthTable}}
+## 年度复盘
+
+### 完成亮点
+
+-
+
+### 问题与风险
+
+-
+
+### 下一年度计划
 
 -
 `;
@@ -98,6 +140,14 @@ function clean(value) {
   return String(value ?? '').trim();
 }
 
+function isPlainObject(value) {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function arrayOrEmpty(value) {
+  return Array.isArray(value) ? value : [];
+}
+
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
@@ -110,9 +160,13 @@ function pad3(value) {
   return String(value).padStart(3, '0');
 }
 
-function todayIso() {
-  const d = new Date();
+function todayIsoFromDate(date) {
+  const d = date instanceof Date && !Number.isNaN(date.getTime()) ? date : new Date();
   return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+}
+
+function todayIso() {
+  return todayIsoFromDate(new Date());
 }
 
 function currentMonth() {
@@ -131,20 +185,16 @@ function previousMonthFromDate(date) {
   return monthFromDate(new Date(date.getFullYear(), date.getMonth() - 1, 1));
 }
 
-function firstBusinessDayIso(month) {
-  if (!isValidMonth(month)) return '';
-  const [year, monthNumber] = month.split('-').map(Number);
-  const date = new Date(year, monthNumber - 1, 1);
-  while ([0, 6].includes(date.getDay())) date.setDate(date.getDate() + 1);
-  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
+function previousYearFromDate(date) {
+  return String(date.getFullYear() - 1);
 }
 
-function isFirstBusinessDay(date = new Date()) {
-  return todayIsoFromDate(date) === firstBusinessDayIso(monthFromDate(date));
+function isFirstDayOfMonth(date = new Date()) {
+  return date.getDate() === 1;
 }
 
-function todayIsoFromDate(date) {
-  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
+function isFirstDayOfYear(date = new Date()) {
+  return date.getMonth() === 0 && date.getDate() === 1;
 }
 
 function formatMonthTitle(month) {
@@ -156,6 +206,30 @@ function formatMonthTitle(month) {
 function isValidMonth(value) {
   const match = clean(value).match(/^(20\d{2})-(\d{2})$/);
   return !!match && Number(match[2]) >= 1 && Number(match[2]) <= 12;
+}
+
+function isValidDate(value) {
+  const match = clean(value).match(/^(20\d{2})-(\d{2})-(\d{2})$/);
+  if (!match) return false;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  if (month < 1 || month > 12 || day < 1 || day > 31) return false;
+  const date = new Date(year, month - 1, day);
+  return date.getFullYear() === year && date.getMonth() === month - 1 && date.getDate() === day;
+}
+
+function normalizeDate(value, month = '') {
+  const match = clean(value).match(/^(20\d{2}-\d{2}-\d{2})(?:[T\s].*)?$/);
+  const date = match ? match[1] : '';
+  if (!isValidDate(date)) return '';
+  return isValidMonth(month) && date.slice(0, 7) !== month ? '' : date;
+}
+
+function lastDateOfMonth(month) {
+  if (!isValidMonth(month)) return '';
+  const [year, monthNumber] = month.split('-').map(Number);
+  return `${month}-${pad2(new Date(year, monthNumber, 0).getDate())}`;
 }
 
 function normalizeMonth(year, month) {
@@ -230,8 +304,9 @@ function defaultTaskTypes() {
 function normalizeTaskTypes(taskTypes, fallback = []) {
   const result = [];
   const seen = new Set();
-  const source = Array.isArray(taskTypes) ? taskTypes : fallback;
+  const source = Array.isArray(taskTypes) ? taskTypes : arrayOrEmpty(fallback);
   source.forEach((item, index) => {
+    if (!isPlainObject(item)) return;
     const id = clean(item && item.id);
     if (!id || seen.has(id)) return;
     const legacy = CATEGORY_BY_ID.get(id) || {};
@@ -250,31 +325,34 @@ function normalizeTaskTypes(taskTypes, fallback = []) {
 }
 
 function normalizeTaskTemplates(templates, taskTypes = []) {
-  const categoryIds = new Set(taskTypes.map((item) => item.id));
+  const taskTypeList = arrayOrEmpty(taskTypes).filter(isPlainObject);
+  const categoryIds = new Set(taskTypeList.map((item) => item.id));
   const source = Array.isArray(templates) ? templates : [];
   return source.map((item, index) => {
+    if (!isPlainObject(item)) return null;
     const category = clean(item.category);
     return {
       id: clean(item.id) || makeId('tpl'),
       name: clean(item.name),
       project: clean(item.project || item.projectName || item.belongingProject),
-      category: categoryIds.has(category) ? category : (taskTypes[0] && taskTypes[0].id) || 'feature',
+      category: categoryIds.has(category) ? category : (taskTypeList[0] && taskTypeList[0].id) || 'feature',
       issue: clean(item.issue),
       plannedHours: toNumber(item.plannedHours ?? item.planned),
-      status: clean(item.status || 'doing'),
+      status: normalizeStatus(item.status),
       enabled: item.enabled !== false,
       sort: Number.isFinite(Number(item.sort)) ? Number(item.sort) : index
     };
-  }).filter((item) => item.name).sort((a, b) => Number(a.sort || 0) - Number(b.sort || 0) || a.name.localeCompare(b.name));
+  }).filter((item) => item && item.name).sort((a, b) => Number(a.sort || 0) - Number(b.sort || 0) || a.name.localeCompare(b.name));
 }
 
 function normalizeSettings(settings) {
-  const taskTypes = normalizeTaskTypes(settings.taskTypes);
-  const defaultTaskTemplates = normalizeTaskTemplates(settings.defaultTaskTemplates, taskTypes);
+  const source = isPlainObject(settings) ? settings : {};
+  const taskTypes = normalizeTaskTypes(source.taskTypes);
+  const defaultTaskTemplates = normalizeTaskTemplates(source.defaultTaskTemplates, taskTypes);
   return {
-    worklogFolder: normalizeFolderPath(settings.worklogFolder) || DEFAULT_SETTINGS.worklogFolder,
-    dataFolder: normalizeFolderPath(settings.dataFolder),
-    createMonthlyReport: settings.createMonthlyReport === true || settings.createMonthlyNote === true,
+    worklogFolder: normalizeFolderPath(source.worklogFolder) || DEFAULT_SETTINGS.worklogFolder,
+    dataFolder: normalizeFolderPath(source.dataFolder),
+    createMonthlyReport: source.createMonthlyReport === true || source.createMonthlyNote === true,
     taskTypes,
     defaultTaskTemplates
   };
@@ -323,9 +401,10 @@ function categoriesForData(data, configuredCategories) {
   const effectiveCategories = Array.isArray(configuredCategories)
     ? configuredCategories
     : (data && Array.isArray(data.categories) ? data.categories : CATEGORIES);
-  const taskCategoryIds = new Set((data && Array.isArray(data.tasks) ? data.tasks : []).map((task) => clean(task.category)).filter(Boolean));
+  const taskCategoryIds = new Set(arrayOrEmpty(data && data.tasks).filter(isPlainObject).map((task) => clean(task.category)).filter(Boolean));
   const add = (category) => {
-    const id = clean(category && category.id);
+    if (!isPlainObject(category)) return;
+    const id = clean(category.id);
     if (!id || seen.has(id)) return;
     const fallback = CATEGORY_BY_ID.get(id) || {};
     const index = categories.length;
@@ -340,10 +419,10 @@ function categoriesForData(data, configuredCategories) {
     seen.add(id);
   };
   normalizeTaskTypes(effectiveCategories).forEach(add);
-  (data && Array.isArray(data.categories) ? data.categories : [])
+  arrayOrEmpty(data && data.categories)
     .filter((category) => taskCategoryIds.has(clean(category && category.id)))
     .forEach(add);
-  (data && Array.isArray(data.tasks) ? data.tasks : []).forEach((task) => add({ id: clean(task.category), label: clean(task.category) }));
+  arrayOrEmpty(data && data.tasks).filter(isPlainObject).forEach((task) => add({ id: clean(task.category), label: clean(task.category) }));
   if (categories.length) return categories.sort((a, b) => Number(a.sort || 0) - Number(b.sort || 0) || a.label.localeCompare(b.label));
   return hasConfiguredCategories || hasDataCategories ? [] : defaultTaskTypes();
 }
@@ -353,13 +432,13 @@ function makeTaskId(date, sequence) {
 }
 
 function taskIdDate(month, preferredDate) {
-  const date = clean(preferredDate);
-  if (/^20\d{2}-\d{2}-\d{2}$/.test(date) && (!month || date.startsWith(month))) return date;
+  const date = normalizeDate(preferredDate, month);
+  if (date) return date;
   return `${month || currentMonth()}-01`;
 }
 
 function nextTaskId(tasks, month, preferredDate) {
-  const ids = tasks instanceof Set ? tasks : new Set((tasks || []).map((task) => clean(task.id)).filter(Boolean));
+  const ids = tasks instanceof Set ? tasks : new Set(arrayOrEmpty(tasks).filter(isPlainObject).map((task) => clean(task.id)).filter(Boolean));
   const date = taskIdDate(month, preferredDate);
   let sequence = 1;
   while (ids.has(makeTaskId(date, sequence))) sequence += 1;
@@ -367,17 +446,23 @@ function nextTaskId(tasks, month, preferredDate) {
 }
 
 function hasLogForTaskDate(logs, taskId, date, ignoreLogId = '') {
-  return (logs || []).some((log) => clean(log.taskId) === clean(taskId) && clean(log.date) === clean(date) && (!ignoreLogId || clean(log.id) !== clean(ignoreLogId)));
+  return arrayOrEmpty(logs).filter(isPlainObject).some((log) => clean(log.taskId) === clean(taskId) && clean(log.date) === clean(date) && (!ignoreLogId || clean(log.id) !== clean(ignoreLogId)));
 }
 
 function statusClass(status) {
   return `worklog-task-status-${(clean(status) || 'unknown').replace(/[^a-z0-9_-]/gi, '-').toLowerCase()}`;
 }
 
+function normalizeStatus(value, fallback = 'doing') {
+  const status = clean(value) || fallback;
+  return STATUSES.some((item) => item.id === status) ? status : fallback;
+}
+
 function defaultData(month, settings = DEFAULT_SETTINGS) {
-  const taskTypes = normalizeTaskTypes(settings.taskTypes);
+  const sourceSettings = isPlainObject(settings) ? settings : DEFAULT_SETTINGS;
+  const taskTypes = normalizeTaskTypes(sourceSettings.taskTypes);
   const enabledTypeIds = new Set(taskTypes.filter((item) => item.enabled !== false).map((item) => item.id));
-  const templates = normalizeTaskTemplates(settings.defaultTaskTemplates, taskTypes)
+  const templates = normalizeTaskTemplates(sourceSettings.defaultTaskTemplates, taskTypes)
     .filter((item) => item.enabled !== false && enabledTypeIds.has(item.category));
   const usedIds = new Set();
   const tasks = templates.map((task) => {
@@ -390,7 +475,7 @@ function defaultData(month, settings = DEFAULT_SETTINGS) {
       category: task.category,
       issue: task.issue || '',
       plannedHours: toNumber(task.plannedHours),
-      status: task.status || 'doing'
+      status: normalizeStatus(task.status)
     };
   });
   const now = new Date().toISOString();
@@ -407,21 +492,24 @@ function defaultData(month, settings = DEFAULT_SETTINGS) {
 }
 
 function normalizeData(raw, month, settings = DEFAULT_SETTINGS) {
-  const data = Object.assign(defaultData(month, settings), raw || {});
+  const sourceSettings = isPlainObject(settings) ? settings : DEFAULT_SETTINGS;
+  const source = isPlainObject(raw) ? raw : {};
+  const targetMonth = isValidMonth(month) ? month : (isValidMonth(source.month) ? source.month : currentMonth());
+  const data = Object.assign(defaultData(targetMonth, sourceSettings), source);
   data.schemaVersion = 2;
-  data.month = clean(data.month) || month;
-  const taskTypes = normalizeTaskTypes(settings.taskTypes);
+  data.month = targetMonth;
+  const taskTypes = normalizeTaskTypes(sourceSettings.taskTypes);
   data.categories = categoriesForData(data, taskTypes);
   delete data.statuses;
-  data.tasks = (data.tasks || []).map((task) => ({
+  data.tasks = arrayOrEmpty(data.tasks).filter(isPlainObject).map((task) => ({
     id: clean(task.id),
     name: clean(task.name),
     project: clean(task.project || task.projectName || task.belongingProject),
     category: clean(task.category || 'feature'),
     issue: clean(task.issue),
     plannedHours: toNumber(task.plannedHours ?? task.planned),
-    status: clean(task.status || 'doing')
-  }));
+    status: normalizeStatus(task.status)
+  })).filter((task) => task.name);
   const usedIds = new Set(data.tasks.map((task) => clean(task.id)).filter(Boolean));
   data.tasks = data.tasks.map((task) => {
     if (task.id) return task;
@@ -429,17 +517,23 @@ function normalizeData(raw, month, settings = DEFAULT_SETTINGS) {
     usedIds.add(id);
     return Object.assign({}, task, { id });
   });
-  data.logs = (data.logs || []).map((log, index) => ({
-    id: clean(log.id) || `log-${index}-${Date.now().toString(36)}`,
-    date: clean(log.date),
-    taskId: clean(log.taskId),
-    hours: toNumber(log.hours),
-    work: clean(log.work),
-    issueLink: clean(log.issueLink || log.issue)
-  }));
-  const completed = data.dailyStatus && Array.isArray(data.dailyStatus.completedDates) ? data.dailyStatus.completedDates : [];
+  data.logs = arrayOrEmpty(data.logs).filter(isPlainObject).map((log, index) => {
+    const date = normalizeDate(log.date, data.month);
+    const taskId = clean(log.taskId);
+    const hours = toNumber(log.hours);
+    if (!date || !taskId || hours <= 0) return null;
+    return {
+      id: clean(log.id) || `log-${index}-${Date.now().toString(36)}`,
+      date,
+      taskId,
+      hours,
+      work: clean(log.work),
+      issueLink: clean(log.issueLink || log.issue)
+    };
+  }).filter(Boolean);
+  const completed = isPlainObject(data.dailyStatus) ? arrayOrEmpty(data.dailyStatus.completedDates) : [];
   data.dailyStatus = {
-    completedDates: Array.from(new Set(completed.map(clean).filter((date) => /^20\d{2}-\d{2}-\d{2}$/.test(date) && date.startsWith(data.month)))).sort()
+    completedDates: Array.from(new Set(completed.map((date) => normalizeDate(date, data.month)).filter(Boolean))).sort()
   };
   return data;
 }
@@ -463,27 +557,30 @@ function buildCalendarCells(month, dailyHours, dailyCounts) {
 }
 
 function deriveWorklogData(data) {
+  const source = isPlainObject(data) ? data : defaultData(currentMonth());
+  const tasks = arrayOrEmpty(source.tasks).filter(isPlainObject);
+  const logs = arrayOrEmpty(source.logs).filter(isPlainObject);
   const tasksById = new Map();
   const actualByTask = new Map();
   const daily = new Map();
   const dailyCount = new Map();
   const logCountByTask = new Map();
-  const categories = categoriesForData(data, data.categories);
-  const taskCategoryIds = new Set(data.tasks.map((task) => clean(task.category)).filter(Boolean));
+  const categories = categoriesForData(source, source.categories);
+  const taskCategoryIds = new Set(tasks.map((task) => clean(task.category)).filter(Boolean));
   const taskCategories = categories.filter((category) => taskCategoryIds.has(category.id));
   const categoryById = new Map(categories.map((item) => [item.id, item]));
-  data.tasks.forEach((task) => tasksById.set(task.id, task));
-  data.logs.forEach((log) => {
+  tasks.forEach((task) => tasksById.set(task.id, task));
+  logs.forEach((log) => {
     const hours = toNumber(log.hours);
     actualByTask.set(log.taskId, (actualByTask.get(log.taskId) || 0) + hours);
     daily.set(log.date, (daily.get(log.date) || 0) + hours);
     dailyCount.set(log.date, (dailyCount.get(log.date) || 0) + 1);
     logCountByTask.set(log.taskId, (logCountByTask.get(log.taskId) || 0) + 1);
   });
-  const totalPlanned = data.tasks.reduce((sum, task) => sum + toNumber(task.plannedHours), 0);
-  const totalActual = data.logs.reduce((sum, log) => sum + toNumber(log.hours), 0);
-  const totalTasks = data.tasks.length;
-  const statusCounts = taskStatusCounts(data.tasks);
+  const totalPlanned = tasks.reduce((sum, task) => sum + toNumber(task.plannedHours), 0);
+  const totalActual = logs.reduce((sum, log) => sum + toNumber(log.hours), 0);
+  const totalTasks = tasks.length;
+  const statusCounts = taskStatusCounts(tasks);
   const completedTasks = statusCounts.done || 0;
   return {
     tasksById,
@@ -504,7 +601,7 @@ function deriveWorklogData(data) {
 
 function taskStatusCounts(tasks) {
   const counts = Object.fromEntries(STATUSES.map((status) => [status.id, 0]));
-  (tasks || []).forEach((task) => {
+  arrayOrEmpty(tasks).filter(isPlainObject).forEach((task) => {
     const status = clean(task.status || 'doing') || 'doing';
     if (Object.prototype.hasOwnProperty.call(counts, status)) counts[status] += 1;
   });
@@ -533,14 +630,17 @@ function addModalTitleBadge(modalEl, text) {
 }
 
 function taskTypeRowsForData(data, d = deriveWorklogData(data)) {
+  const source = isPlainObject(data) ? data : defaultData(currentMonth());
+  const tasks = arrayOrEmpty(source.tasks).filter(isPlainObject);
+  const logs = arrayOrEmpty(source.logs).filter(isPlainObject);
   const totalsByCategory = new Map(d.taskCategories.map((category) => [category.id, { planned: 0, actual: 0, tasks: 0 }]));
-  data.tasks.forEach((task) => {
+  tasks.forEach((task) => {
     const totals = totalsByCategory.get(task.category);
     if (!totals) return;
     totals.planned += toNumber(task.plannedHours);
     totals.tasks += 1;
   });
-  data.logs.forEach((log) => {
+  logs.forEach((log) => {
     const task = d.tasksById.get(log.taskId);
     const totals = task ? totalsByCategory.get(task.category) : null;
     if (totals) totals.actual += toNumber(log.hours);
@@ -557,14 +657,34 @@ function taskTypeRowsForData(data, d = deriveWorklogData(data)) {
       tasks: totals.tasks,
       plannedRatio: d.totalPlanned > 0 ? (totals.planned / d.totalPlanned) * 100 : 0,
       actualRatio: d.totalActual > 0 ? (totals.actual / d.totalActual) * 100 : 0,
-      taskRatio: data.tasks.length > 0 ? (totals.tasks / data.tasks.length) * 100 : 0
+      taskRatio: tasks.length > 0 ? (totals.tasks / tasks.length) * 100 : 0
     };
   }).sort((a, b) => compareCategories(a, b) || b.actual - a.actual || a.label.localeCompare(b.label));
 }
 
+function normalizeWorklogItem(item) {
+  const data = isPlainObject(item) && isPlainObject(item.data) ? item.data : item;
+  if (!isPlainObject(data) || !isValidMonth(data.month)) return null;
+  const derived = isPlainObject(item) && isPlainObject(item.d)
+    ? item.d
+    : (isPlainObject(item) && isPlainObject(item.derived) ? item.derived : null);
+  return { data, d: derived };
+}
+
+function scopedWorklogItems(items, year = '', month = '') {
+  const selectedYear = normalizeYear(year);
+  const selectedMonth = selectedYear && isValidMonth(month) && month.startsWith(`${selectedYear}-`) ? month : '';
+  return arrayOrEmpty(items)
+    .map(normalizeWorklogItem)
+    .filter(Boolean)
+    .filter(({ data }) => (!selectedYear || data.month.startsWith(`${selectedYear}-`)) && (!selectedMonth || data.month === selectedMonth))
+    .sort((a, b) => a.data.month.localeCompare(b.data.month))
+    .map(({ data, d }) => ({ data, d: d || deriveWorklogData(data) }));
+}
+
 function yearSummary(items) {
   const byYear = new Map();
-  items.forEach((data) => {
+  scopedWorklogItems(items).forEach(({ data, d }) => {
     const year = data.month.slice(0, 4);
     if (!byYear.has(year)) {
       byYear.set(year, {
@@ -581,8 +701,9 @@ function yearSummary(items) {
       });
     }
     const summary = byYear.get(year);
-    const d = deriveWorklogData(data);
-    data.tasks.forEach((task) => {
+    const tasks = arrayOrEmpty(data.tasks).filter(isPlainObject);
+    const logs = arrayOrEmpty(data.logs).filter(isPlainObject);
+    tasks.forEach((task) => {
       summary.taskIds.add(task.id);
       const categoryId = clean(task.category) || 'blank';
       const category = d.categoryById.get(categoryId);
@@ -594,7 +715,7 @@ function yearSummary(items) {
       row.planned += toNumber(task.plannedHours);
       row.tasks += 1;
     });
-    data.logs.forEach((log) => {
+    logs.forEach((log) => {
       const task = d.tasksById.get(log.taskId);
       const categoryId = task ? task.category : 'unknown';
       const category = d.categoryById.get(categoryId);
@@ -607,8 +728,8 @@ function yearSummary(items) {
     });
     summary.totalPlanned += d.totalPlanned;
     summary.totalActual += d.totalActual;
-    summary.totalLogs += data.logs.length;
-    summary.totalTasks += data.tasks.length;
+    summary.totalLogs += logs.length;
+    summary.totalTasks += tasks.length;
     summary.completedTasks += d.completedTasks;
     STATUSES.forEach((status) => {
       summary.statusCounts[status.id] += d.statusCounts[status.id] || 0;
@@ -617,8 +738,8 @@ function yearSummary(items) {
       month: data.month,
       plannedHours: d.totalPlanned,
       actualHours: d.totalActual,
-      logs: data.logs.length,
-      tasks: data.tasks.length
+      logs: logs.length,
+      tasks: tasks.length
     });
   });
   return Array.from(byYear.values()).sort((a, b) => b.year.localeCompare(a.year)).map((summary) => {
@@ -636,7 +757,7 @@ function yearSummary(items) {
 }
 
 function projectRowsForScope(items, year, month = '') {
-  const selectedYear = clean(year);
+  const selectedYear = normalizeYear(year);
   const selectedMonth = isValidMonth(month) && month.startsWith(`${selectedYear}-`) ? month : '';
   const projects = new Map();
   let totalPlanned = 0;
@@ -661,11 +782,9 @@ function projectRowsForScope(items, year, month = '') {
     return projects.get(project);
   };
 
-  (items || [])
-    .filter((data) => clean(data && data.month).startsWith(selectedYear) && (!selectedMonth || data.month === selectedMonth))
-    .forEach((data) => {
-      const d = deriveWorklogData(data);
-      data.tasks.forEach((task) => {
+  scopedWorklogItems(items, selectedYear, selectedMonth)
+    .forEach(({ data, d }) => {
+      arrayOrEmpty(data.tasks).filter(isPlainObject).forEach((task) => {
         const row = ensureProject(task.project);
         const category = d.categoryById.get(task.category);
         row.months.add(data.month);
@@ -677,7 +796,7 @@ function projectRowsForScope(items, year, month = '') {
         totalPlanned += toNumber(task.plannedHours);
         totalTasks += 1;
       });
-      data.logs.forEach((log) => {
+      arrayOrEmpty(data.logs).filter(isPlainObject).forEach((log) => {
         const task = d.tasksById.get(log.taskId);
         const row = ensureProject(task ? task.project : '未归属项目');
         const hours = toNumber(log.hours);
@@ -736,7 +855,10 @@ function buildMonthlyReportContent(data, dataPath, template = DEFAULT_MONTHLY_RE
 }
 
 function buildMonthlyReportContext(data, dataPath) {
-  const d = deriveWorklogData(data);
+  const source = isPlainObject(data) ? data : defaultData(currentMonth());
+  const tasks = arrayOrEmpty(source.tasks).filter(isPlainObject);
+  const logs = arrayOrEmpty(source.logs).filter(isPlainObject);
+  const d = deriveWorklogData(source);
   const diff = d.totalActual - d.totalPlanned;
   const overviewRows = [
     ['计划工时', `${formatHours(d.totalPlanned)}h`],
@@ -745,20 +867,20 @@ function buildMonthlyReportContext(data, dataPath) {
     ['完成率', `${completionPercent(d.completedTasks, d.totalTasks)}%`],
     ['任务数', String(d.totalTasks)],
     ['任务类型', `${d.taskCategories.length} 类`],
-    ['记录数', String(data.logs.length)]
+    ['记录数', String(logs.length)]
   ];
   const statusRows = STATUSES.map((status) => [
     status.label,
     String(d.statusCounts[status.id] || 0)
   ]);
-  const categoryRows = taskTypeRowsForData(data, d).map((category) => [
+  const categoryRows = taskTypeRowsForData(source, d).map((category) => [
     category.label,
     `${formatHours(category.planned)}h`,
     `${formatHours(category.actual)}h`,
     `${formatSignedHours(category.actual - category.planned)}h`,
     `${category.tasks} 个`
   ]);
-  const projectScope = projectRowsForScope([data], data.month.slice(0, 4), data.month);
+  const projectScope = projectRowsForScope([{ data: source, d }], source.month.slice(0, 4), source.month);
   const projectRows = projectScope.rows.map((row) => [
     row.project,
     row.categories.join('、') || '-',
@@ -778,11 +900,11 @@ function buildMonthlyReportContext(data, dataPath) {
       statusLabel(task.status)
     ];
   };
-  const completedTaskRows = data.tasks.filter((task) => clean(task.status || 'doing') === 'done').map(taskRow);
-  const carryTaskRows = data.tasks
+  const completedTaskRows = tasks.filter((task) => clean(task.status || 'doing') === 'done').map(taskRow);
+  const carryTaskRows = tasks
     .filter((task) => !['done', 'cancelled'].includes(clean(task.status || 'doing')))
     .map(taskRow);
-  const logRows = data.logs.map((log) => {
+  const logRows = logs.map((log) => {
     const task = d.tasksById.get(log.taskId);
     return [
       log.date,
@@ -793,8 +915,8 @@ function buildMonthlyReportContext(data, dataPath) {
     ];
   });
   return {
-    month: data.month,
-    monthTitle: formatMonthTitle(data.month),
+    month: source.month,
+    monthTitle: formatMonthTitle(source.month),
     dataPath,
     createdAt: new Date().toISOString(),
     overviewTable: markdownTable(['指标', '数值'], overviewRows),
@@ -807,6 +929,81 @@ function buildMonthlyReportContext(data, dataPath) {
   };
 }
 
+function buildAnnualReportContent(items, year, dataFolder, template = DEFAULT_ANNUAL_REPORT_TEMPLATE) {
+  const context = buildAnnualReportContext(items, year, dataFolder);
+  const source = typeof template === 'string' && template.trim() ? template : DEFAULT_ANNUAL_REPORT_TEMPLATE;
+  return source.replace(/\{\{([a-zA-Z0-9_]+)\}\}/g, (_, key) => (
+    Object.prototype.hasOwnProperty.call(context, key) ? context[key] : ''
+  ));
+}
+
+function buildAnnualReportContext(items, year, dataFolder) {
+  const targetYear = normalizeYear(year) || currentYear();
+  const yearItems = scopedWorklogItems(items, targetYear);
+  const summary = yearSummary(yearItems).find((item) => item.year === targetYear) || {
+    year: targetYear,
+    months: [],
+    totalPlanned: 0,
+    totalActual: 0,
+    totalLogs: 0,
+    totalTasks: 0,
+    completedTasks: 0,
+    statusCounts: taskStatusCounts([]),
+    categoryRows: []
+  };
+  const diff = summary.totalActual - summary.totalPlanned;
+  const overviewRows = [
+    ['统计月份', `${summary.months.length} 个月`],
+    ['计划工时', `${formatHours(summary.totalPlanned)}h`],
+    ['实际工时', `${formatHours(summary.totalActual)}h`],
+    ['差异', `${formatSignedHours(diff)}h`],
+    ['完成率', `${completionPercent(summary.completedTasks, summary.totalTasks)}%`],
+    ['任务数', `${summary.totalTasks} 个`],
+    ['任务类型', `${summary.categoryRows.length} 类`],
+    ['记录数', `${summary.totalLogs} 条`]
+  ];
+  const statusRows = STATUSES.map((status) => [
+    status.label,
+    String(summary.statusCounts[status.id] || 0)
+  ]);
+  const categoryRows = summary.categoryRows.map((category) => [
+    category.label,
+    `${formatHours(category.planned)}h`,
+    `${formatHours(category.actual)}h`,
+    `${formatSignedHours(category.actual - category.planned)}h`,
+    `${category.tasks} 个`,
+    formatPercent(category.plannedRatio)
+  ]);
+  const projectScope = projectRowsForScope(yearItems, targetYear);
+  const projectRows = projectScope.rows.map((row) => [
+    row.project,
+    row.months.join('、') || '-',
+    row.categories.slice(0, 5).join('、') || '-',
+    row.issues.slice(0, 5).join('、') || '-',
+    `${formatHours(row.planned)}h`,
+    `${formatHours(row.actual)}h`,
+    `${row.tasks} 个`
+  ]);
+  const monthRows = summary.months.map((month) => [
+    month.month,
+    `${formatHours(month.plannedHours)}h`,
+    `${formatHours(month.actualHours)}h`,
+    `${formatSignedHours(month.actualHours - month.plannedHours)}h`,
+    `${month.tasks} 个`,
+    `${month.logs} 条`
+  ]);
+  return {
+    year: targetYear,
+    dataFolder,
+    createdAt: new Date().toISOString(),
+    overviewTable: markdownTable(['指标', '数值'], overviewRows),
+    statusTable: markdownTable(['状态', '任务数'], statusRows),
+    categoryTable: markdownTable(['类型', '计划工时', '实际工时', '差异', '任务数', '计划占比'], categoryRows, '暂无任务类型数据。'),
+    projectTable: markdownTable(['项目', '月份', '任务类型', '关联 issue', '计划工时', '实际工时', '任务数'], projectRows, '暂无项目数据。'),
+    monthTable: markdownTable(['月份', '计划工时', '实际工时', '差异', '任务数', '记录数'], monthRows, '暂无月度数据。')
+  };
+}
+
 class WorklogMonthPickerModal extends Modal {
   constructor(app, plugin, options = {}) {
     super(app);
@@ -814,7 +1011,7 @@ class WorklogMonthPickerModal extends Modal {
     this.title = options.title || '选择月份';
     this.actionText = options.actionText || '确定';
     this.monthDesc = options.monthDesc || '选择月份';
-    this.months = Array.from(new Set((options.months || []).filter(isValidMonth))).sort((a, b) => b.localeCompare(a));
+    this.months = Array.from(new Set(arrayOrEmpty(options.months).filter(isValidMonth))).sort((a, b) => b.localeCompare(a));
     this.year = normalizeYear(options.year) || (this.months[0] ? this.months[0].slice(0, 4) : currentYear());
     this.month = clean(options.month) || (this.months[0] ? this.months[0].slice(5, 7) : currentMonth().slice(5, 7));
   }
@@ -889,7 +1086,7 @@ class CreateWorklogMonthModal extends WorklogMonthPickerModal {
 
 class JumpWorklogMonthModal extends WorklogMonthPickerModal {
   constructor(app, plugin, months) {
-    const sortedMonths = Array.from(new Set((months || []).filter(isValidMonth))).sort((a, b) => b.localeCompare(a));
+    const sortedMonths = Array.from(new Set(arrayOrEmpty(months).filter(isValidMonth))).sort((a, b) => b.localeCompare(a));
     super(app, plugin, {
       title: '跳转到月份工时工作台',
       actionText: '打开',
@@ -922,7 +1119,7 @@ class JumpWorklogYearModal extends Modal {
   constructor(app, plugin, years) {
     super(app);
     this.plugin = plugin;
-    this.existingYears = Array.from(new Set((years || []).map(normalizeYear).filter(Boolean))).sort((a, b) => b.localeCompare(a));
+    this.existingYears = Array.from(new Set(arrayOrEmpty(years).map(normalizeYear).filter(Boolean))).sort((a, b) => b.localeCompare(a));
     this.year = this.existingYears[0] || currentYear();
   }
 
@@ -971,9 +1168,9 @@ class WorklogPlugin extends Plugin {
     this.addCommand({ id: 'jump-worklog-year', name: '跳转到年度工时看板', callback: async () => new JumpWorklogYearModal(this.app, this, await this.availableYears()).open() });
     this.addCommand({ id: 'open-worklog-year-dashboard', name: '打开年度工时看板', callback: () => this.openYearDashboard() });
     this.addSettingTab(new WorklogSettingTab(this.app, this));
-    await this.maybeCreateMonthlyReport();
+    await this.maybeCreateReports();
     if (typeof window !== 'undefined') {
-      this.registerInterval(window.setInterval(() => this.maybeCreateMonthlyReport(), 60 * 60 * 1000));
+      this.registerInterval(window.setInterval(() => this.maybeCreateReports(), 60 * 60 * 1000));
     }
   }
 
@@ -1021,11 +1218,6 @@ class WorklogPlugin extends Plugin {
     return `${this.dataFolder()}/${targetMonth.slice(0, 4)}/${targetMonth}.json`;
   }
 
-  legacyDataPath(month) {
-    const targetMonth = isValidMonth(month) ? month : currentMonth();
-    return `${this.dataFolder()}/${targetMonth}.json`;
-  }
-
   monthDataFolder(month) {
     const targetMonth = isValidMonth(month) ? month : currentMonth();
     return `${this.dataFolder()}/${targetMonth.slice(0, 4)}`;
@@ -1033,14 +1225,10 @@ class WorklogPlugin extends Plugin {
 
   monthFromDataPath(path) {
     const prefix = escapeRegExp(this.dataFolder());
-    const match = clean(path).match(new RegExp(`^${prefix}/(?:(20\\d{2})/)?(20\\d{2}-\\d{2})\\.json$`));
+    const match = clean(path).match(new RegExp(`^${prefix}/(20\\d{2})/(20\\d{2}-\\d{2})\\.json$`));
     if (!match) return '';
+    if (match[1] !== match[2].slice(0, 4)) return '';
     return match[2];
-  }
-
-  isLegacyDataPath(path) {
-    const prefix = escapeRegExp(this.dataFolder());
-    return new RegExp(`^${prefix}/20\\d{2}-\\d{2}\\.json$`).test(clean(path));
   }
 
   async handleDataFileModify(file) {
@@ -1072,12 +1260,27 @@ class WorklogPlugin extends Plugin {
     this.refreshYearDashboards();
   }
 
+  reportYearFolder(year) {
+    const targetYear = normalizeYear(year) || currentYear();
+    return `${this.reportFolder()}/${targetYear}`;
+  }
+
   monthlyReportPath(month) {
-    return `${this.reportFolder()}/${month} 月度终结报告.md`;
+    const targetMonth = isValidMonth(month) ? month : currentMonth();
+    return `${this.reportYearFolder(targetMonth.slice(0, 4))}/${targetMonth} 月度终结报告.md`;
+  }
+
+  annualReportPath(year) {
+    const targetYear = normalizeYear(year) || currentYear();
+    return `${this.reportYearFolder(targetYear)}/${targetYear} 年度终结报告.md`;
   }
 
   monthlyReportTemplatePath() {
     return `${this.reportFolder()}/月度终结报告模板.md`;
+  }
+
+  annualReportTemplatePath() {
+    return `${this.reportFolder()}/年度终结报告模板.md`;
   }
 
   async ensureFolder(folder) {
@@ -1102,7 +1305,6 @@ class WorklogPlugin extends Plugin {
     const targetMonth = isValidMonth(month) ? month : currentMonth();
     await this.ensureAdapterFolder(this.monthDataFolder(targetMonth));
     const path = this.dataPath(targetMonth);
-    const legacyPath = this.legacyDataPath(targetMonth);
     if (await this.app.vault.adapter.exists(path)) {
       try {
         return normalizeData(JSON.parse(await this.app.vault.adapter.read(path)), targetMonth, this.settings);
@@ -1112,16 +1314,6 @@ class WorklogPlugin extends Plugin {
         return normalizeData({}, targetMonth, this.settings);
       }
     }
-    if (await this.app.vault.adapter.exists(legacyPath)) {
-      try {
-        const data = normalizeData(JSON.parse(await this.app.vault.adapter.read(legacyPath)), targetMonth, this.settings);
-        await this.app.vault.adapter.write(path, JSON.stringify(data, null, 2));
-        await this.removeLegacyDataFile(legacyPath);
-        return data;
-      } catch (error) {
-        console.error(`Worklog: failed to migrate ${legacyPath}`, error);
-      }
-    }
     const data = defaultData(targetMonth, this.settings);
     await this.app.vault.adapter.write(path, JSON.stringify(data, null, 2));
     return data;
@@ -1129,16 +1321,7 @@ class WorklogPlugin extends Plugin {
 
   async dataFiles() {
     const files = await this.adapterFiles(this.dataFolder());
-    const byMonth = new Map();
-    files.forEach((path) => {
-      const month = this.monthFromDataPath(path);
-      if (!month) return;
-      const existing = byMonth.get(month);
-      if (!existing || (this.isLegacyDataPath(existing) && !this.isLegacyDataPath(path))) {
-        byMonth.set(month, path);
-      }
-    });
-    return Array.from(byMonth.values()).sort((a, b) => a.localeCompare(b));
+    return files.filter((path) => this.monthFromDataPath(path)).sort((a, b) => a.localeCompare(b));
   }
 
   async adapterFiles(folder) {
@@ -1195,8 +1378,8 @@ class WorklogPlugin extends Plugin {
     const migrated = await this.copyFolderFiles(previousFolder, nextFolder, (path) => path.endsWith('.md'));
     this.settings.worklogFolder = nextFolder;
     await this.saveSettings();
-    await this.ensureMonthlyReportTemplate();
-    new Notice(`已保存月度终结报告目录，迁移 ${migrated.copied} 个文件${migrated.skipped ? `，跳过 ${migrated.skipped} 个已存在文件` : ''}`);
+    await this.ensureReportTemplates();
+    new Notice(`已保存终结报告目录，迁移 ${migrated.copied} 个文件${migrated.skipped ? `，跳过 ${migrated.skipped} 个已存在文件` : ''}`);
   }
 
   async readExistingData(path) {
@@ -1208,6 +1391,24 @@ class WorklogPlugin extends Plugin {
       console.error(`Worklog: failed to read ${path}`, error);
       return null;
     }
+  }
+
+  async readExistingMonthData(month) {
+    const targetMonth = isValidMonth(month) ? month : '';
+    if (!targetMonth) return null;
+    const path = this.dataPath(targetMonth);
+    if (!(await this.app.vault.adapter.exists(path))) return null;
+    const data = await this.readExistingData(path);
+    if (data) return { data, path };
+    return null;
+  }
+
+  async readExistingYearData(year) {
+    const targetYear = normalizeYear(year);
+    if (!targetYear) return [];
+    const files = (await this.dataFiles()).filter((path) => this.monthFromDataPath(path).startsWith(`${targetYear}-`));
+    const items = await Promise.all(files.map((file) => this.readExistingData(file)));
+    return items.filter(Boolean).sort((a, b) => a.month.localeCompare(b.month));
   }
 
   async readAllExistingData() {
@@ -1222,32 +1423,38 @@ class WorklogPlugin extends Plugin {
     const path = this.dataPath(month);
     const next = Object.assign({}, data, { updatedAt: new Date().toISOString() });
     await this.app.vault.adapter.write(path, JSON.stringify(next, null, 2));
-    const legacyPath = this.legacyDataPath(month);
-    if (legacyPath !== path && await this.app.vault.adapter.exists(legacyPath)) {
-      await this.removeLegacyDataFile(legacyPath);
-    }
     this.refreshMonthViews(month);
     this.refreshYearDashboards();
     return next;
   }
 
-  shouldCreateMonthlyReport() {
+  shouldCreateReports() {
     return !!this.settings.createMonthlyReport;
   }
 
   monthlyReportTargetMonth(date = new Date()) {
-    return isFirstBusinessDay(date) ? previousMonthFromDate(date) : '';
+    return isFirstDayOfMonth(date) ? previousMonthFromDate(date) : '';
   }
 
-  async maybeCreateMonthlyReport(showNotice = false) {
-    if (!this.shouldCreateMonthlyReport()) return null;
-    await this.ensureMonthlyReportTemplate();
+  annualReportTargetYear(date = new Date()) {
+    return isFirstDayOfYear(date) ? previousYearFromDate(date) : '';
+  }
+
+  async maybeCreateReports(showNotice = false) {
+    if (!this.shouldCreateReports()) return { monthly: null, annual: null };
+    await this.ensureReportTemplates();
     const month = this.monthlyReportTargetMonth();
-    if (!month) {
-      if (showNotice) new Notice('已开启月度终结报告；模板已创建，报告会在每月第一个工作日生成。');
-      return null;
-    }
-    return this.createMonthlyReport(month, showNotice);
+    const year = this.annualReportTargetYear();
+    const monthly = month ? await this.createMonthlyReport(month, showNotice) : null;
+    const annual = year ? await this.createAnnualReport(year, showNotice) : null;
+    if (showNotice && !month && !year) new Notice('已开启终结报告；月报会在每月 1 日生成，年报会在每年 1 月 1 日生成。');
+    return { monthly, annual };
+  }
+
+  async ensureReportTemplates() {
+    const monthly = await this.ensureMonthlyReportTemplate();
+    const annual = await this.ensureAnnualReportTemplate();
+    return { monthly, annual };
   }
 
   async ensureMonthlyReportTemplate() {
@@ -1258,9 +1465,17 @@ class WorklogPlugin extends Plugin {
     return this.app.vault.create(path, DEFAULT_MONTHLY_REPORT_TEMPLATE);
   }
 
+  async ensureAnnualReportTemplate() {
+    await this.ensureFolder(this.reportFolder());
+    const path = this.annualReportTemplatePath();
+    const file = this.app.vault.getAbstractFileByPath(path);
+    if (file) return file;
+    return this.app.vault.create(path, DEFAULT_ANNUAL_REPORT_TEMPLATE);
+  }
+
   async createMonthlyReport(month, showNotice = false) {
     const targetMonth = isValidMonth(month) ? month : previousMonthFromDate(new Date());
-    await this.ensureFolder(this.reportFolder());
+    await this.ensureFolder(this.reportYearFolder(targetMonth.slice(0, 4)));
     const templateFile = await this.ensureMonthlyReportTemplate();
     const path = this.monthlyReportPath(targetMonth);
     const existing = this.app.vault.getAbstractFileByPath(path);
@@ -1268,28 +1483,48 @@ class WorklogPlugin extends Plugin {
       if (showNotice) new Notice(`${targetMonth} 月度终结报告已存在`);
       return existing;
     }
-    const data = await this.readData(targetMonth);
+    const existingData = await this.readExistingMonthData(targetMonth);
+    if (!existingData) {
+      if (showNotice) new Notice(`${targetMonth} 没有工时数据，未创建月度终结报告`);
+      return null;
+    }
     let template = DEFAULT_MONTHLY_REPORT_TEMPLATE;
     try {
       template = await this.app.vault.read(templateFile);
     } catch (error) {
       console.error('Worklog: failed to read monthly report template', error);
     }
-    const content = buildMonthlyReportContent(data, this.dataPath(targetMonth), template);
+    const content = buildMonthlyReportContent(existingData.data, existingData.path, template);
     const file = await this.app.vault.create(path, content);
     if (showNotice) new Notice(`已创建 ${targetMonth} 月度终结报告`);
     return file;
   }
 
-  async removeLegacyDataFile(path) {
-    const file = this.app.vault.getAbstractFileByPath(path);
-    if (file) {
-      await this.app.vault.delete(file);
-      return;
+  async createAnnualReport(year, showNotice = false) {
+    const targetYear = normalizeYear(year) || previousYearFromDate(new Date());
+    await this.ensureFolder(this.reportYearFolder(targetYear));
+    const templateFile = await this.ensureAnnualReportTemplate();
+    const path = this.annualReportPath(targetYear);
+    const existing = this.app.vault.getAbstractFileByPath(path);
+    if (existing) {
+      if (showNotice) new Notice(`${targetYear} 年度终结报告已存在`);
+      return existing;
     }
-    if (typeof this.app.vault.adapter.remove === 'function' && await this.app.vault.adapter.exists(path)) {
-      await this.app.vault.adapter.remove(path);
+    const yearData = await this.readExistingYearData(targetYear);
+    if (!yearData.length) {
+      if (showNotice) new Notice(`${targetYear} 年没有工时数据，未创建年度终结报告`);
+      return null;
     }
+    let template = DEFAULT_ANNUAL_REPORT_TEMPLATE;
+    try {
+      template = await this.app.vault.read(templateFile);
+    } catch (error) {
+      console.error('Worklog: failed to read annual report template', error);
+    }
+    const content = buildAnnualReportContent(yearData, targetYear, this.dataFolder(), template);
+    const file = await this.app.vault.create(path, content);
+    if (showNotice) new Notice(`已创建 ${targetYear} 年度终结报告`);
+    return file;
   }
 
   async openView(month = currentMonth()) {
@@ -1413,17 +1648,12 @@ class WorklogView extends ItemView {
     return button;
   }
 
-  actionIconButton(icon, label, className, onClick, disabled = false, showTooltip = true) {
+  actionIconButton(icon, label, className, onClick, disabled = false) {
     const button = this.el('button', `worklog-icon-button ${className || ''}`.trim());
     button.type = 'button';
     button.disabled = disabled;
     setIcon(button, icon);
     button.appendChild(this.el('span', 'worklog-visually-hidden', label));
-    if (showTooltip) {
-      const tooltip = this.el('span', 'worklog-action-tooltip', label);
-      tooltip.setAttribute('aria-hidden', 'true');
-      button.appendChild(tooltip);
-    }
     button.addEventListener('click', (event) => {
       if (button.disabled) return;
       onClick(event);
@@ -1715,13 +1945,13 @@ class WorklogView extends ItemView {
       const actions = this.el('div', 'worklog-row-actions worklog-task-actions');
       actions.appendChild(this.actionIconButton('pencil', '编辑任务', 'subtle', () => {
         new TaskModal(this.app, this, task, index).open();
-      }, false, false));
+      }));
       actions.appendChild(this.actionIconButton('trash-2', refs > 0 ? '已有工时记录，不能删除' : '删除任务', 'danger subtle', async () => {
         await this.save(Object.assign({}, this.data, {
           tasks: this.data.tasks.filter((_, i) => i !== index),
           logs: this.data.logs.filter((log) => log.taskId !== task.id)
         }));
-      }, refs > 0, false));
+      }, refs > 0));
       row.appendChild(actions);
       list.appendChild(row);
     });
@@ -1756,11 +1986,11 @@ class WorklogView extends ItemView {
       const actions = this.el('div', 'worklog-row-actions');
       actions.appendChild(this.actionIconButton('pencil', '编辑工时记录', 'subtle', () => {
         new LogModal(this.app, this, log.date, log).open();
-      }, false, false));
+      }));
       actions.appendChild(this.actionIconButton('trash-2', '删除工时记录', 'danger subtle', async () => {
         if (!confirm('删除这条工时记录？')) return;
         await this.save(Object.assign({}, this.data, { logs: this.data.logs.filter((_, i) => i !== index) }));
-      }, false, false));
+      }));
       actionTd.appendChild(actions);
       tr.appendChild(actionTd);
       body.appendChild(tr);
@@ -2468,25 +2698,34 @@ class LogModal extends Modal {
     this.setTitle(editing ? '编辑工时' : '新增工时');
     addModalTitleBadge(this.modalEl, this.selectedDate);
     const date = this.addInput('日期', this.editingLog?.date || this.selectedDate, 'date');
+    date.min = `${this.view.data.month}-01`;
+    date.max = lastDateOfMonth(this.view.data.month);
     const hours = this.addInput('工时', editing ? String(this.editingLog.hours || '') : '1', 'number');
     const taskSelect = this.addTaskSelect(this.editingLog?.taskId || '');
     const work = this.addTextArea('工作内容', this.editingLog?.work || '');
     const selectedTask = this.view.data.tasks.find((item) => item.id === taskSelect.value);
     const displayIssue = this.editingLog ? (this.editingLog.issueLink || (selectedTask ? selectedTask.issue : '')) : '';
     const issue = this.addInput('关联 issue', displayIssue);
+    const syncIssueFromTask = () => {
+      const task = this.view.data.tasks.find((item) => item.id === taskSelect.value);
+      if (task && !clean(issue.value)) issue.value = clean(task.issue);
+    };
+    taskSelect.addEventListener('change', syncIssueFromTask);
+    if (!editing) syncIssueFromTask();
     new Setting(this.contentEl)
       .addButton((button) => button.setButtonText('取消').onClick(() => this.close()))
       .addButton((button) => button.setButtonText(editing ? '保存修改' : '保存工时').setCta().onClick(async () => {
       const task = this.view.data.tasks.find((item) => item.id === taskSelect.value);
       if (!task) return new Notice('请选择任务');
-      if (!clean(date.value).startsWith(this.view.data.month)) return new Notice(`日期必须属于当前月 ${this.view.data.month}`);
-      if (hasLogForTaskDate(this.view.data.logs, task.id, date.value, this.editingLog?.id || '')) return new Notice(`当天已登记过该任务：${task.name}`);
+      const logDate = normalizeDate(date.value, this.view.data.month);
+      if (!logDate) return new Notice(`日期必须是 ${this.view.data.month} 内的有效日期`);
+      if (hasLogForTaskDate(this.view.data.logs, task.id, logDate, this.editingLog?.id || '')) return new Notice(`当天已登记过该任务：${task.name}`);
       const category = categoriesForData(this.view.data).find((item) => item.id === task.category);
       if (category && category.requiresLogIssue && !clean(issue.value)) return new Notice('该任务类型必须填写关联 issue');
       if (!clean(work.value)) return new Notice('工作内容不能为空');
       const log = {
         id: this.editingLog?.id || `log-${Date.now().toString(36)}`,
-        date: date.value,
+        date: logDate,
         taskId: task.id,
         hours: toNumber(hours.value),
         work: clean(work.value),
@@ -2547,7 +2786,7 @@ class WorklogSettingTab extends PluginSettingTab {
     const header = shell.createDiv({ cls: 'worklog-settings-header' });
     const title = header.createDiv({ cls: 'worklog-title-block' });
     title.createEl('h2', { text: 'Worklog 插件设置' });
-    title.createEl('p', { text: '任务类型、默认任务模板、数据目录和月度终结报告都可以在这里维护。' });
+    title.createEl('p', { text: '任务类型、默认任务模板、数据目录和终结报告都可以在这里维护。' });
     const headerActions = header.createDiv({ cls: 'worklog-settings-actions' });
     const addTypeButton = headerActions.createEl('button', { cls: 'worklog-button primary', text: '新增任务类型' });
     addTypeButton.addEventListener('click', async () => {
@@ -2580,25 +2819,25 @@ class WorklogSettingTab extends PluginSettingTab {
 
     const configGrid = shell.createDiv({ cls: 'worklog-settings-config-grid' });
     const syncPanel = configGrid.createDiv({ cls: 'worklog-settings-panel worklog-settings-config-panel' });
-    syncPanel.createEl('h3', { text: '月度终结报告' });
+    syncPanel.createEl('h3', { text: '终结报告' });
     new Setting(syncPanel)
-      .setName('每月第一个工作日创建月度总结')
-      .setDesc('开启后会创建“月度终结报告模板.md”，并在每月第一个工作日读取上个月数据生成月度总结。')
+      .setName('自动创建月度 / 年度总结')
+      .setDesc('开启后会创建“月度终结报告模板.md”和“年度终结报告模板.md”；每月 1 日读取上个月数据生成月度总结，每年 1 月 1 日读取上一年度数据生成年度总结。')
       .addToggle((toggle) => toggle.setValue(!!this.plugin.settings.createMonthlyReport).onChange(async (value) => {
         this.plugin.settings.createMonthlyReport = value;
         await this.plugin.saveSettings();
         if (value) {
-          await this.plugin.ensureMonthlyReportTemplate();
-          await this.plugin.maybeCreateMonthlyReport(true);
+          await this.plugin.ensureReportTemplates();
+          await this.plugin.maybeCreateReports(true);
         } else {
-          new Notice('已关闭月度终结报告');
+          new Notice('已关闭终结报告自动创建');
         }
       }));
     let reportFolderValue = this.plugin.settings.worklogFolder;
     new Setting(syncPanel)
       .setClass('worklog-path-setting')
-      .setName('月度终结报告目录')
-      .setDesc('修改后点击“保存并迁移”，会把旧目录中的报告和模板复制到新目录；旧目录文件会保留。')
+      .setName('终结报告目录')
+      .setDesc('修改后点击“保存并迁移”，会把原目录中的报告和模板复制到新目录；原目录文件会保留。')
       .addText((text) => text.setValue(reportFolderValue).onChange((value) => {
         reportFolderValue = normalizeFolderPath(value) || DEFAULT_SETTINGS.worklogFolder;
       }))
@@ -2614,7 +2853,7 @@ class WorklogSettingTab extends PluginSettingTab {
     new Setting(dataPanel)
       .setClass('worklog-path-setting')
       .setName('保存位置')
-      .setDesc(`留空时默认保存到 ${this.plugin.defaultDataFolder()}；修改后点击“保存并迁移”，会把旧目录中的 JSON 数据复制到新目录，旧目录文件会保留。`)
+      .setDesc(`留空时默认保存到 ${this.plugin.defaultDataFolder()}；修改后点击“保存并迁移”，会把原目录中的 JSON 数据复制到新目录，原目录文件会保留。`)
       .addText((text) => text.setPlaceholder(this.plugin.defaultDataFolder()).setValue(dataFolderValue).onChange((value) => {
         dataFolderValue = normalizeFolderPath(value);
       }))
@@ -2649,11 +2888,10 @@ class WorklogSettingTab extends PluginSettingTab {
     this.display();
   }
 
-  iconButton(button, icon, label, extraClass = '', showTooltip = false) {
+  iconButton(button, icon, label, extraClass = '') {
     if (typeof button.setIcon === 'function') button.setIcon(icon);
     else button.setButtonText(label);
-    if (showTooltip) button.buttonEl.setAttribute('aria-label', label);
-    else button.buttonEl.removeAttribute('aria-label');
+    button.buttonEl.removeAttribute('aria-label');
     button.buttonEl.classList.add('worklog-setting-icon-button');
     if (extraClass) button.buttonEl.classList.add(extraClass);
     return button;
