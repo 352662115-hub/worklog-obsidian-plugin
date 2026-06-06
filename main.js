@@ -1661,6 +1661,41 @@ class WorklogView extends ItemView {
     return button;
   }
 
+  pageScrollContainer(node) {
+    const viewContent = this.contentEl && this.contentEl.closest ? this.contentEl.closest('.view-content') : null;
+    if (viewContent && viewContent !== node) return viewContent;
+    if (this.contentEl && this.contentEl !== node) return this.contentEl;
+    let parent = node ? node.parentElement : null;
+    while (parent) {
+      if (typeof window !== 'undefined' && window.getComputedStyle) {
+        const overflowY = window.getComputedStyle(parent).overflowY;
+        if (/(auto|scroll|overlay)/.test(overflowY)) return parent;
+      }
+      parent = parent.parentElement;
+    }
+    return null;
+  }
+
+  attachBoundaryWheelScroll(scroller) {
+    if (!scroller) return;
+    scroller.addEventListener('wheel', (event) => {
+      if (event.defaultPrevented || !event.deltaY) return;
+      const maxScrollTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+      const atTop = scroller.scrollTop <= 0;
+      const atBottom = scroller.scrollTop >= maxScrollTop - 1;
+      const shouldPassToPage = maxScrollTop <= 1 || (event.deltaY < 0 && atTop) || (event.deltaY > 0 && atBottom);
+      if (!shouldPassToPage) return;
+      const page = this.pageScrollContainer(scroller);
+      if (!page || page === scroller) return;
+      const scrollDelta = event.deltaMode === 1
+        ? event.deltaY * 16
+        : (event.deltaMode === 2 ? event.deltaY * page.clientHeight : event.deltaY);
+      const before = page.scrollTop;
+      page.scrollTop += scrollDelta;
+      if (page.scrollTop !== before) event.preventDefault();
+    }, { passive: false });
+  }
+
   render() {
     this.contentEl.empty();
     const root = this.contentEl.createDiv({ cls: 'worklog-plugin-view' });
@@ -1956,6 +1991,7 @@ class WorklogView extends ItemView {
       list.appendChild(row);
     });
     if (!this.data.tasks.length) list.appendChild(this.el('div', 'worklog-empty worklog-empty-compact', '暂无任务'));
+    this.attachBoundaryWheelScroll(list);
     section.appendChild(list);
     return section;
   }
@@ -1997,6 +2033,7 @@ class WorklogView extends ItemView {
     });
     table.appendChild(body);
     tableWrap.appendChild(table);
+    this.attachBoundaryWheelScroll(tableWrap);
     section.appendChild(tableWrap);
     return section;
   }
