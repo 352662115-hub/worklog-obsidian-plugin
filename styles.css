@@ -1280,6 +1280,7 @@ button.worklog-pie-legend-arrow:disabled {
 .worklog-task-card,
 .worklog-log-card,
 .worklog-calendar-card {
+  position: relative;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   min-height: 0;
@@ -1701,10 +1702,20 @@ button.worklog-pie-legend-arrow:disabled {
   table-layout: fixed;
 }
 
+.worklog-log-table th,
+.worklog-log-table td {
+  height: 40px;
+  max-height: 40px;
+  box-sizing: border-box;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: middle;
+}
+
 .worklog-log-table th:nth-child(1),
 .worklog-log-table td:nth-child(1) {
   width: 88px;
-  white-space: nowrap;
 }
 
 .worklog-log-table th:nth-child(2),
@@ -1715,7 +1726,6 @@ button.worklog-pie-legend-arrow:disabled {
 .worklog-log-table th:nth-child(3),
 .worklog-log-table td:nth-child(3) {
   width: 58px;
-  white-space: nowrap;
   text-align: right;
 }
 
@@ -1732,14 +1742,48 @@ button.worklog-pie-legend-arrow:disabled {
 .worklog-log-table th:nth-child(6),
 .worklog-log-table td:nth-child(6) {
   width: 76px;
-  white-space: nowrap;
 }
 
-.worklog-log-table td:nth-child(2),
-.worklog-log-table td:nth-child(5) {
+.worklog-log-work-cell {
+  overflow: hidden;
+}
+
+.worklog-log-work-text {
+  display: block;
+  max-width: 100%;
+  min-width: 0;
+  outline: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.worklog-log-work-tooltip {
+  position: absolute;
+  z-index: 12;
+  width: max-content;
+  min-width: 120px;
+  max-width: min(420px, calc(100vw - 32px));
+  transform: translate(-50%, -50%) scale(0.98);
+  border: 1px solid var(--worklog-border);
+  border-radius: 6px;
+  background: var(--background-primary);
+  box-shadow: 0 8px 20px rgb(15 23 42 / 16%);
+  color: var(--text-normal);
+  padding: 6px 9px;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.35;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease, transform 120ms ease;
+}
+
+.worklog-log-work-tooltip.is-visible {
+  opacity: 1;
+  transform: translate(-50%, -50%) scale(1);
 }
 
 .worklog-table-actions-cell {

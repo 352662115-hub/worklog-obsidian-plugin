@@ -2003,7 +2003,10 @@ class WorklogView extends ItemView {
     head.appendChild(this.el('h3', '', title));
     head.appendChild(this.el('span', 'worklog-badge', 'JSON 本地保存'));
     section.appendChild(head);
+    const tooltip = this.el('div', 'worklog-log-work-tooltip');
+    section.appendChild(tooltip);
     const tableWrap = this.el('div', 'worklog-table-scroll');
+    tableWrap.addEventListener('scroll', () => tooltip.classList.remove('is-visible'));
     const table = this.el('table', 'worklog-table worklog-log-table');
     table.innerHTML = '<thead><tr><th>日期</th><th>任务</th><th>工时</th><th>工作内容</th><th>issue</th><th>操作</th></tr></thead>';
     const body = this.el('tbody');
@@ -2016,7 +2019,7 @@ class WorklogView extends ItemView {
       tr.appendChild(this.td(log.date));
       tr.appendChild(this.td(task ? task.name : '未找到任务'));
       tr.appendChild(this.td(`${formatHours(log.hours)}h`));
-      tr.appendChild(this.td(log.work));
+      tr.appendChild(this.workContentCell(log.work, section, tooltip));
       tr.appendChild(this.td(log.issueLink || (task ? task.issue : '') || '-'));
       const actionTd = this.el('td', 'worklog-table-actions-cell');
       const actions = this.el('div', 'worklog-row-actions');
@@ -2040,6 +2043,41 @@ class WorklogView extends ItemView {
 
   td(text, className = '') {
     return this.el('td', className, text);
+  }
+
+  workContentCell(text, card, tooltip) {
+    const value = clean(text) || '-';
+    const cell = this.el('td', 'worklog-log-work-cell');
+    const label = this.el('span', 'worklog-log-work-text', value);
+    label.tabIndex = 0;
+    const showTooltip = () => {
+      if (label.scrollWidth <= label.clientWidth) return;
+      tooltip.textContent = value;
+      tooltip.classList.remove('is-visible');
+      const cardRect = card.getBoundingClientRect();
+      const cellRect = cell.getBoundingClientRect();
+      const tipWidth = tooltip.offsetWidth || 220;
+      const tipHeight = tooltip.offsetHeight || 44;
+      const centerLeft = cellRect.left - cardRect.left + (cellRect.width / 2);
+      const centerTop = cellRect.top - cardRect.top + (cellRect.height / 2);
+      const minLeft = 8 + (tipWidth / 2);
+      const maxLeft = card.clientWidth - 8 - (tipWidth / 2);
+      const minTop = 8 + (tipHeight / 2);
+      const maxTop = card.clientHeight - 8 - (tipHeight / 2);
+      tooltip.style.left = `${Math.min(Math.max(centerLeft, minLeft), Math.max(minLeft, maxLeft))}px`;
+      tooltip.style.top = `${Math.min(Math.max(centerTop, minTop), Math.max(minTop, maxTop))}px`;
+      tooltip.classList.add('is-visible');
+    };
+    const hideTooltip = () => tooltip.classList.remove('is-visible');
+    label.addEventListener('mouseenter', showTooltip);
+    label.addEventListener('mouseleave', hideTooltip);
+    label.addEventListener('focus', showTooltip);
+    label.addEventListener('blur', hideTooltip);
+    label.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') hideTooltip();
+    });
+    cell.appendChild(label);
+    return cell;
   }
 }
 
