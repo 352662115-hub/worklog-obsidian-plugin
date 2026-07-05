@@ -4,6 +4,7 @@ const VIEW_TYPE = 'worklog-view';
 const YEAR_VIEW_TYPE = 'worklog-year-view';
 const CONFIG_FILE_NAME = 'config.json';
 const DATA_FOLDER_NAME = 'data';
+const WORKLOG_SCHEMA_VERSION = 2;
 const DEFAULT_SETTINGS = {
   worklogFolder: 'worklog',
   dataFolder: '',
@@ -293,6 +294,15 @@ function formatPercent(value) {
   return `${Number.isInteger(rounded) ? rounded.toFixed(0) : String(rounded)}%`;
 }
 
+function clampNumber(value, min, max) {
+  const n = Number(value);
+  const low = Number(min);
+  const high = Number(max);
+  if (!Number.isFinite(n)) return Number.isFinite(low) ? low : 0;
+  if (!Number.isFinite(low) || !Number.isFinite(high)) return n;
+  return Math.min(Math.max(n, low), Math.max(low, high));
+}
+
 function makeId(prefix) {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
 }
@@ -458,6 +468,29 @@ function normalizeStatus(value, fallback = 'doing') {
   return STATUSES.some((item) => item.id === status) ? status : fallback;
 }
 
+function normalizeSchemaVersion(value) {
+  const version = Number(value);
+  return Number.isInteger(version) && version > 0 ? version : 1;
+}
+
+function migrateData(raw, month, settings = DEFAULT_SETTINGS) {
+  const source = isPlainObject(raw) ? clone(raw) : {};
+  const targetMonth = isValidMonth(month) ? month : (isValidMonth(source.month) ? source.month : currentMonth());
+  const version = normalizeSchemaVersion(source.schemaVersion);
+  if (version < 2) {
+    if (!Array.isArray(source.categories) && Array.isArray(source.taskTypes)) source.categories = source.taskTypes;
+    if (!Array.isArray(source.tasks)) source.tasks = [];
+    if (!Array.isArray(source.logs)) source.logs = [];
+    if (!isPlainObject(source.dailyStatus)) source.dailyStatus = {};
+    if (Array.isArray(source.completedDates) && !Array.isArray(source.dailyStatus.completedDates)) {
+      source.dailyStatus.completedDates = source.completedDates;
+    }
+  }
+  source.month = targetMonth;
+  source.schemaVersion = WORKLOG_SCHEMA_VERSION;
+  return source;
+}
+
 function defaultData(month, settings = DEFAULT_SETTINGS) {
   const sourceSettings = isPlainObject(settings) ? settings : DEFAULT_SETTINGS;
   const taskTypes = normalizeTaskTypes(sourceSettings.taskTypes);
@@ -480,7 +513,7 @@ function defaultData(month, settings = DEFAULT_SETTINGS) {
   });
   const now = new Date().toISOString();
   return {
-    schemaVersion: 2,
+    schemaVersion: WORKLOG_SCHEMA_VERSION,
     month,
     categories: clone(taskTypes),
     tasks,
@@ -493,10 +526,10 @@ function defaultData(month, settings = DEFAULT_SETTINGS) {
 
 function normalizeData(raw, month, settings = DEFAULT_SETTINGS) {
   const sourceSettings = isPlainObject(settings) ? settings : DEFAULT_SETTINGS;
-  const source = isPlainObject(raw) ? raw : {};
+  const source = migrateData(raw, month, sourceSettings);
   const targetMonth = isValidMonth(month) ? month : (isValidMonth(source.month) ? source.month : currentMonth());
   const data = Object.assign(defaultData(targetMonth, sourceSettings), source);
-  data.schemaVersion = 2;
+  data.schemaVersion = WORKLOG_SCHEMA_VERSION;
   data.month = targetMonth;
   const taskTypes = normalizeTaskTypes(sourceSettings.taskTypes);
   data.categories = categoriesForData(data, taskTypes);
@@ -627,6 +660,83 @@ function addModalTitleBadge(modalEl, text) {
     className: 'worklog-modal-title-badge',
     textContent: text
   }));
+}
+
+function hideAnchoredTooltip(tooltip) {
+  if (!tooltip || !tooltip.classList) return;
+  tooltip.classList.remove('is-visible');
+}
+
+function renderAnchoredTooltipContent(tooltip, content) {
+  if (!tooltip || content === undefined) return;
+  tooltip.textContent = '';
+  if (typeof content === 'function') {
+    content(tooltip);
+  } else if (content && typeof Node !== 'undefined' && content instanceof Node) {
+    tooltip.appendChild(content);
+  } else {
+    tooltip.textContent = clean(content);
+  }
+}
+
+function positionAnchoredTooltip(anchorEl, tooltip, containerEl, options = {}) {
+  if (!anchorEl || !tooltip || !containerEl || !anchorEl.getBoundingClientRect || !containerEl.getBoundingClientRect) return;
+  const containerRect = containerEl.getBoundingClientRect();
+  const anchorRect = anchorEl.getBoundingClientRect();
+  const point = options.point || null;
+  const edge = Number.isFinite(Number(options.edge)) ? Number(options.edge) : 8;
+  const offset = Number.isFinite(Number(options.offset)) ? Number(options.offset) : 12;
+  const tipWidth = tooltip.offsetWidth || Number(options.fallbackWidth) || 160;
+  const tipHeight = tooltip.offsetHeight || Number(options.fallbackHeight) || 72;
+  const anchorLeft = point && Number.isFinite(point.clientX) ? point.clientX : anchorRect.left;
+  const anchorTop = point && Number.isFinite(point.clientY) ? point.clientY : anchorRect.top;
+  const anchorWidth = point && Number.isFinite(point.clientX) ? 0 : anchorRect.width;
+  const anchorHeight = point && Number.isFinite(point.clientY) ? 0 : anchorRect.height;
+  const centerX = anchorLeft - containerRect.left + anchorWidth / 2;
+  const centerY = anchorTop - containerRect.top + anchorHeight / 2;
+  let left = centerX - tipWidth / 2;
+  let top = centerY - tipHeight / 2;
+
+  switch (options.placement || (point ? 'cursor' : 'center')) {
+    case 'cursor':
+      left = anchorLeft - containerRect.left + offset;
+      top = anchorTop - containerRect.top + offset;
+      break;
+    case 'left-center':
+      left = anchorLeft - containerRect.left - tipWidth - offset;
+      top = centerY - tipHeight / 2;
+      break;
+    case 'right-center':
+      left = anchorLeft - containerRect.left + anchorWidth + offset;
+      top = centerY - tipHeight / 2;
+      break;
+    case 'top-center':
+      left = centerX - tipWidth / 2;
+      top = anchorTop - containerRect.top - tipHeight - offset;
+      break;
+    case 'bottom-center':
+      left = centerX - tipWidth / 2;
+      top = anchorTop - containerRect.top + anchorHeight + offset;
+      break;
+    case 'center':
+    default:
+      break;
+  }
+
+  const maxLeft = Math.max(edge, containerEl.clientWidth - tipWidth - edge);
+  const maxTop = Math.max(edge, containerEl.clientHeight - tipHeight - edge);
+  tooltip.style.left = `${clampNumber(left, edge, maxLeft)}px`;
+  tooltip.style.top = `${clampNumber(top, edge, maxTop)}px`;
+}
+
+function showAnchoredTooltip(anchorEl, text, containerEl, options = {}) {
+  const tooltip = options.tooltip || options.tooltipEl;
+  if (!tooltip || !containerEl || !anchorEl) return null;
+  renderAnchoredTooltipContent(tooltip, text);
+  hideAnchoredTooltip(tooltip);
+  positionAnchoredTooltip(anchorEl, tooltip, containerEl, options);
+  tooltip.classList.add('is-visible');
+  return tooltip;
 }
 
 function taskTypeRowsForData(data, d = deriveWorklogData(data)) {
@@ -1421,7 +1531,7 @@ class WorklogPlugin extends Plugin {
     const month = isValidMonth(data.month) ? data.month : currentMonth();
     await this.ensureAdapterFolder(this.monthDataFolder(month));
     const path = this.dataPath(month);
-    const next = Object.assign({}, data, { updatedAt: new Date().toISOString() });
+    const next = normalizeData(Object.assign({}, data, { updatedAt: new Date().toISOString() }), month, this.settings);
     await this.app.vault.adapter.write(path, JSON.stringify(next, null, 2));
     this.refreshMonthViews(month);
     this.refreshYearDashboards();
@@ -1587,6 +1697,9 @@ class WorklogView extends ItemView {
     this.month = currentMonth();
     this.selectedDate = '';
     this.data = null;
+    this.logQuery = '';
+    this.logTaskFilter = '';
+    this.logDateScope = 'selected';
   }
 
   getViewType() {
@@ -1807,13 +1920,17 @@ class WorklogView extends ItemView {
   }
 
   showChartTooltip(event, chartBody, tooltip, row) {
-    this.renderChartTooltip(tooltip, row);
-    this.positionChartTooltip(event, chartBody, tooltip);
-    tooltip.classList.add('is-visible');
+    showAnchoredTooltip(event.currentTarget, (node) => this.renderChartTooltip(node, row), chartBody, {
+      tooltip,
+      point: event,
+      placement: 'cursor',
+      fallbackWidth: 142,
+      fallbackHeight: 92
+    });
   }
 
   hideChartTooltip(tooltip) {
-    tooltip.classList.remove('is-visible');
+    hideAnchoredTooltip(tooltip);
   }
 
   renderChartTooltip(tooltip, row) {
@@ -1824,29 +1941,13 @@ class WorklogView extends ItemView {
     tooltip.appendChild(this.tooltipRow('占比', 'planned', formatPercent(row.category.plannedRatio)));
   }
 
-  positionChartTooltip(event, chartBody, tooltip) {
-    const bodyRect = chartBody.getBoundingClientRect();
-    const tipWidth = tooltip.offsetWidth || 142;
-    const tipHeight = tooltip.offsetHeight || 92;
-    const maxLeft = Math.max(8, chartBody.clientWidth - tipWidth - 8);
-    const maxTop = Math.max(8, chartBody.clientHeight - tipHeight - 8);
-    const left = Math.min(Math.max(event.clientX - bodyRect.left + 14, 8), maxLeft);
-    const top = Math.min(Math.max(event.clientY - bodyRect.top + 14, 8), maxTop);
-    tooltip.style.left = `${left}px`;
-    tooltip.style.top = `${top}px`;
-  }
-
   centerChartTooltip(chartBody, target, tooltip, row) {
-    this.renderChartTooltip(tooltip, row);
-    const bodyRect = chartBody.getBoundingClientRect();
-    const groupRect = target.getBoundingClientRect();
-    const tipWidth = tooltip.offsetWidth || 142;
-    const tipHeight = tooltip.offsetHeight || 92;
-    const left = Math.min(Math.max(groupRect.left - bodyRect.left + groupRect.width / 2 + 12, 8), Math.max(8, chartBody.clientWidth - tipWidth - 8));
-    const top = Math.min(Math.max(groupRect.top - bodyRect.top + groupRect.height / 2 - tipHeight / 2, 8), Math.max(8, chartBody.clientHeight - tipHeight - 8));
-    tooltip.style.left = `${left}px`;
-    tooltip.style.top = `${top}px`;
-    tooltip.classList.add('is-visible');
+    showAnchoredTooltip(target, (node) => this.renderChartTooltip(node, row), chartBody, {
+      tooltip,
+      placement: 'right-center',
+      fallbackWidth: 142,
+      fallbackHeight: 92
+    });
   }
 
   tooltipRow(text, tone, value) {
@@ -1926,6 +2027,7 @@ class WorklogView extends ItemView {
       }
       day.addEventListener('click', () => {
         this.selectedDate = this.selectedDate === cell.date ? '' : cell.date;
+        this.logDateScope = this.selectedDate ? 'selected' : 'all';
         this.render();
       });
       grid.appendChild(day);
@@ -1940,7 +2042,11 @@ class WorklogView extends ItemView {
     head.appendChild(this.el('h3', '', '任务清单'));
     head.appendChild(this.el('span', 'worklog-badge', `${this.data.tasks.length} 个任务`));
     section.appendChild(head);
+    const taskTooltip = this.el('div', 'worklog-anchored-tooltip worklog-task-hours-tooltip');
+    taskTooltip.id = makeId('worklog-task-hours-tooltip');
+    section.appendChild(taskTooltip);
     const list = this.el('div', 'worklog-task-list');
+    list.addEventListener('scroll', () => hideAnchoredTooltip(taskTooltip));
     this.data.tasks.forEach((task, index) => {
       const category = d.categoryById.get(task.category);
       const row = this.el('div', `worklog-task-item ${statusClass(task.status)}`);
@@ -1959,12 +2065,22 @@ class WorklogView extends ItemView {
       const remainingHours = toNumber(task.plannedHours) - toNumber(actualHours);
       const remainingText = formatRemainingHours(remainingHours);
       const hours = this.el('span', 'worklog-task-hours', `${remainingText}h`);
-      const hoursTooltip = this.el('span', 'worklog-task-hours-tooltip', `计划工时${formatHours(task.plannedHours)}h-实际总工时${formatHours(actualHours)}h`);
-      const hoursTooltipId = `worklog-task-hours-${clean(task.id).replace(/[^a-z0-9_-]/gi, '-') || index}`;
-      hoursTooltip.id = hoursTooltipId;
+      const hoursTooltipText = `计划工时${formatHours(task.plannedHours)}h-实际总工时${formatHours(actualHours)}h`;
       hours.tabIndex = 0;
-      hours.appendChild(hoursTooltip);
-      hours.setAttribute('aria-describedby', hoursTooltipId);
+      hours.setAttribute('aria-describedby', taskTooltip.id);
+      const showHoursTooltip = () => showAnchoredTooltip(hours, hoursTooltipText, section, {
+        tooltip: taskTooltip,
+        placement: 'left-center',
+        fallbackWidth: 220,
+        fallbackHeight: 34
+      });
+      hours.addEventListener('mouseenter', showHoursTooltip);
+      hours.addEventListener('mouseleave', () => hideAnchoredTooltip(taskTooltip));
+      hours.addEventListener('focus', showHoursTooltip);
+      hours.addEventListener('blur', () => hideAnchoredTooltip(taskTooltip));
+      hours.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape') hideAnchoredTooltip(taskTooltip);
+      });
       row.appendChild(hours);
       const select = document.createElement('select');
       select.className = 'worklog-status-select';
@@ -2001,80 +2117,166 @@ class WorklogView extends ItemView {
     const title = this.selectedDate ? `每日工时明细：${this.selectedDate}` : '每日工时明细';
     const head = this.el('div', 'worklog-card-head');
     head.appendChild(this.el('h3', '', title));
-    head.appendChild(this.el('span', 'worklog-badge', 'JSON 本地保存'));
+    const countBadge = this.el('span', 'worklog-badge', 'JSON 本地保存');
+    head.appendChild(countBadge);
     section.appendChild(head);
-    const tooltip = this.el('div', 'worklog-log-work-tooltip');
+    const tooltip = this.el('div', 'worklog-anchored-tooltip worklog-log-work-tooltip');
     section.appendChild(tooltip);
+    const controls = this.renderLogControls(d, () => renderRows());
+    section.appendChild(controls);
     const tableWrap = this.el('div', 'worklog-table-scroll');
-    tableWrap.addEventListener('scroll', () => tooltip.classList.remove('is-visible'));
+    tableWrap.addEventListener('scroll', () => hideAnchoredTooltip(tooltip));
     const table = this.el('table', 'worklog-table worklog-log-table');
-    table.innerHTML = '<thead><tr><th>日期</th><th>任务</th><th>工时</th><th>工作内容</th><th>issue</th><th>操作</th></tr></thead>';
-    const body = this.el('tbody');
-    const rows = this.data.logs
-      .map((log, index) => ({ log, index }))
-      .filter(({ log }) => !this.selectedDate || log.date === this.selectedDate);
-    rows.forEach(({ log, index }) => {
-      const task = d.tasksById.get(log.taskId);
-      const tr = this.el('tr');
-      tr.appendChild(this.td(log.date));
-      tr.appendChild(this.td(task ? task.name : '未找到任务'));
-      tr.appendChild(this.td(`${formatHours(log.hours)}h`));
-      tr.appendChild(this.workContentCell(log.work, section, tooltip));
-      tr.appendChild(this.td(log.issueLink || (task ? task.issue : '') || '-'));
-      const actionTd = this.el('td', 'worklog-table-actions-cell');
-      const actions = this.el('div', 'worklog-row-actions');
-      actions.appendChild(this.actionIconButton('pencil', '编辑工时记录', 'subtle', () => {
-        new LogModal(this.app, this, log.date, log).open();
-      }));
-      actions.appendChild(this.actionIconButton('trash-2', '删除工时记录', 'danger subtle', async () => {
-        if (!confirm('删除这条工时记录？')) return;
-        await this.save(Object.assign({}, this.data, { logs: this.data.logs.filter((_, i) => i !== index) }));
-      }));
-      actionTd.appendChild(actions);
-      tr.appendChild(actionTd);
-      body.appendChild(tr);
+    const thead = this.el('thead');
+    const headerRow = this.el('tr');
+    ['日期', '任务', '工时', '工作内容', 'issue'].forEach((label) => {
+      headerRow.appendChild(this.el('th', '', label));
     });
+    headerRow.appendChild(this.el('th', '', '操作'));
+    thead.appendChild(headerRow);
+    table.appendChild(thead);
+    const body = this.el('tbody');
+    const renderRows = () => {
+      hideAnchoredTooltip(tooltip);
+      body.textContent = '';
+      const rows = this.filteredLogRows(d);
+      countBadge.textContent = `${rows.length}/${this.data.logs.length} 条`;
+      if (!rows.length) {
+        const emptyRow = this.el('tr');
+        const emptyCell = this.td('暂无匹配的工时记录', 'worklog-log-empty-cell');
+        emptyCell.colSpan = 6;
+        emptyRow.appendChild(emptyCell);
+        body.appendChild(emptyRow);
+        return;
+      }
+      rows.forEach(({ log, index, task, issue }) => {
+        const tr = this.el('tr');
+        tr.appendChild(this.td(log.date));
+        tr.appendChild(this.td(task ? task.name : '未找到任务'));
+        tr.appendChild(this.td(`${formatHours(log.hours)}h`, 'worklog-number-cell'));
+        tr.appendChild(this.workContentCell(log, task, section, tooltip));
+        tr.appendChild(this.td(issue || '-'));
+        const actionTd = this.el('td', 'worklog-table-actions-cell');
+        const actions = this.el('div', 'worklog-row-actions');
+        actions.appendChild(this.actionIconButton('pencil', '编辑工时记录', 'subtle', () => {
+          new LogModal(this.app, this, log.date, log).open();
+        }));
+        actions.appendChild(this.actionIconButton('trash-2', '删除工时记录', 'danger subtle', async () => {
+          if (!confirm('删除这条工时记录？')) return;
+          await this.save(Object.assign({}, this.data, { logs: this.data.logs.filter((_, i) => i !== index) }));
+        }));
+        actionTd.appendChild(actions);
+        tr.appendChild(actionTd);
+        body.appendChild(tr);
+      });
+    };
     table.appendChild(body);
     tableWrap.appendChild(table);
     this.attachBoundaryWheelScroll(tableWrap);
     section.appendChild(tableWrap);
+    renderRows();
     return section;
+  }
+
+  renderLogControls(d, onChange) {
+    const controls = this.el('div', 'worklog-log-controls');
+    const taskIds = new Set(this.data.tasks.map((task) => task.id));
+    if (this.logTaskFilter && !taskIds.has(this.logTaskFilter)) this.logTaskFilter = '';
+    const search = this.el('input', 'worklog-log-search');
+    search.type = 'search';
+    search.placeholder = '搜索工作内容';
+    search.value = this.logQuery;
+    search.setAttribute('aria-label', '搜索工作内容');
+    search.addEventListener('input', () => {
+      this.logQuery = search.value;
+      onChange();
+    });
+    controls.appendChild(search);
+
+    const taskSelect = this.el('select', 'worklog-log-filter');
+    taskSelect.setAttribute('aria-label', '按任务筛选');
+    taskSelect.appendChild(new Option('全部任务', ''));
+    this.data.tasks.forEach((task) => taskSelect.appendChild(new Option(task.name, task.id)));
+    taskSelect.value = this.logTaskFilter;
+    taskSelect.addEventListener('change', () => {
+      this.logTaskFilter = taskSelect.value;
+      onChange();
+    });
+    controls.appendChild(taskSelect);
+
+    const scope = this.el('div', 'worklog-log-scope');
+    const selectedButton = this.el('button', `worklog-scope-button ${this.selectedDate && this.logDateScope !== 'all' ? 'is-active' : ''}`.trim(), '选中日期');
+    selectedButton.type = 'button';
+    selectedButton.disabled = !this.selectedDate;
+    selectedButton.addEventListener('click', () => {
+      if (!this.selectedDate) return;
+      this.logDateScope = 'selected';
+      onChange();
+      this.render();
+    });
+    const allButton = this.el('button', `worklog-scope-button ${!this.selectedDate || this.logDateScope === 'all' ? 'is-active' : ''}`.trim(), '全部');
+    allButton.type = 'button';
+    allButton.addEventListener('click', () => {
+      this.logDateScope = 'all';
+      onChange();
+      this.render();
+    });
+    scope.appendChild(selectedButton);
+    scope.appendChild(allButton);
+    controls.appendChild(scope);
+    return controls;
+  }
+
+  filteredLogRows(d) {
+    const query = clean(this.logQuery).toLowerCase();
+    const taskFilter = clean(this.logTaskFilter);
+    const selectedOnly = !!this.selectedDate && this.logDateScope !== 'all';
+    return this.data.logs
+      .map((log, index) => {
+        const task = d.tasksById.get(log.taskId);
+        const issue = clean(log.issueLink || (task ? task.issue : ''));
+        return { log, index, task, issue };
+      })
+      .filter(({ log, task, issue }) => {
+        if (selectedOnly && log.date !== this.selectedDate) return false;
+        if (taskFilter && log.taskId !== taskFilter) return false;
+        if (query && !clean(log.work).toLowerCase().includes(query)) return false;
+        return true;
+      });
   }
 
   td(text, className = '') {
     return this.el('td', className, text);
   }
 
-  workContentCell(text, card, tooltip) {
-    const value = clean(text) || '-';
+  workContentCell(log, task, card, tooltip) {
+    const value = clean(log && log.work) || '-';
     const cell = this.el('td', 'worklog-log-work-cell');
     const label = this.el('span', 'worklog-log-work-text', value);
+    label.setAttribute('role', 'button');
     label.tabIndex = 0;
     const showTooltip = () => {
       if (label.scrollWidth <= label.clientWidth) return;
-      tooltip.textContent = value;
-      tooltip.classList.remove('is-visible');
-      const cardRect = card.getBoundingClientRect();
-      const cellRect = cell.getBoundingClientRect();
-      const tipWidth = tooltip.offsetWidth || 220;
-      const tipHeight = tooltip.offsetHeight || 44;
-      const centerLeft = cellRect.left - cardRect.left + (cellRect.width / 2);
-      const centerTop = cellRect.top - cardRect.top + (cellRect.height / 2);
-      const minLeft = 8 + (tipWidth / 2);
-      const maxLeft = card.clientWidth - 8 - (tipWidth / 2);
-      const minTop = 8 + (tipHeight / 2);
-      const maxTop = card.clientHeight - 8 - (tipHeight / 2);
-      tooltip.style.left = `${Math.min(Math.max(centerLeft, minLeft), Math.max(minLeft, maxLeft))}px`;
-      tooltip.style.top = `${Math.min(Math.max(centerTop, minTop), Math.max(minTop, maxTop))}px`;
-      tooltip.classList.add('is-visible');
+      showAnchoredTooltip(cell, value, card, {
+        tooltip,
+        placement: 'center',
+        fallbackWidth: 260,
+        fallbackHeight: 48
+      });
     };
-    const hideTooltip = () => tooltip.classList.remove('is-visible');
+    const hideTooltip = () => hideAnchoredTooltip(tooltip);
+    const openDetail = () => new LogDetailModal(this.app, log, task).open();
     label.addEventListener('mouseenter', showTooltip);
     label.addEventListener('mouseleave', hideTooltip);
     label.addEventListener('focus', showTooltip);
     label.addEventListener('blur', hideTooltip);
+    label.addEventListener('click', openDetail);
     label.addEventListener('keydown', (event) => {
       if (event.key === 'Escape') hideTooltip();
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        openDetail();
+      }
     });
     cell.appendChild(label);
     return cell;
@@ -2315,13 +2517,17 @@ class YearDashboardView extends ItemView {
   }
 
   showPieTooltip(event, visual, tooltip, category, color) {
-    this.renderPieTooltip(tooltip, category, color);
-    this.positionYearTooltip(event, visual, tooltip);
-    tooltip.classList.add('is-visible');
+    showAnchoredTooltip(event.currentTarget, (node) => this.renderPieTooltip(node, category, color), visual, {
+      tooltip,
+      point: event,
+      placement: 'cursor',
+      fallbackWidth: 156,
+      fallbackHeight: 76
+    });
   }
 
   hidePieTooltip(tooltip) {
-    tooltip.classList.remove('is-visible');
+    hideAnchoredTooltip(tooltip);
   }
 
   renderPieTooltip(tooltip, category, color) {
@@ -2332,26 +2538,12 @@ class YearDashboardView extends ItemView {
   }
 
   centerPieTooltip(visual, target, tooltip, category, color) {
-    this.renderPieTooltip(tooltip, category, color);
-    const rect = visual.getBoundingClientRect();
-    const targetRect = target.getBoundingClientRect();
-    const tipWidth = tooltip.offsetWidth || 156;
-    const tipHeight = tooltip.offsetHeight || 70;
-    const left = Math.min(Math.max(targetRect.left - rect.left + targetRect.width / 2 - tipWidth / 2, 8), Math.max(8, visual.clientWidth - tipWidth - 8));
-    const top = Math.min(Math.max(targetRect.top - rect.top + targetRect.height / 2 - tipHeight / 2, 8), Math.max(8, visual.clientHeight - tipHeight - 8));
-    tooltip.style.left = `${left}px`;
-    tooltip.style.top = `${top}px`;
-    tooltip.classList.add('is-visible');
-  }
-
-  positionYearTooltip(event, visual, tooltip) {
-    const rect = visual.getBoundingClientRect();
-    const tipWidth = tooltip.offsetWidth || 156;
-    const tipHeight = tooltip.offsetHeight || 76;
-    const left = Math.min(Math.max(event.clientX - rect.left + 12, 8), Math.max(8, visual.clientWidth - tipWidth - 8));
-    const top = Math.min(Math.max(event.clientY - rect.top + 12, 8), Math.max(8, visual.clientHeight - tipHeight - 8));
-    tooltip.style.left = `${left}px`;
-    tooltip.style.top = `${top}px`;
+    showAnchoredTooltip(target, (node) => this.renderPieTooltip(node, category, color), visual, {
+      tooltip,
+      placement: 'center',
+      fallbackWidth: 156,
+      fallbackHeight: 70
+    });
   }
 
   tooltipMetricRow(label, value, color, muted = false) {
@@ -2538,29 +2730,29 @@ class YearDashboardView extends ItemView {
   }
 
   showLineTooltip(event, visual, tooltip, marker, month) {
-    this.renderLineTooltip(tooltip, month);
-    this.positionYearTooltip(event, visual, tooltip);
+    showAnchoredTooltip(event.currentTarget, (node) => this.renderLineTooltip(node, month), visual, {
+      tooltip,
+      point: event,
+      placement: 'cursor',
+      fallbackWidth: 172,
+      fallbackHeight: 96
+    });
     marker.classList.add('is-visible');
-    tooltip.classList.add('is-visible');
   }
 
   hideLineTooltip(tooltip, marker) {
     marker.classList.remove('is-visible');
-    tooltip.classList.remove('is-visible');
+    hideAnchoredTooltip(tooltip);
   }
 
   centerLineTooltip(visual, target, tooltip, marker, month) {
-    this.renderLineTooltip(tooltip, month);
-    const rect = visual.getBoundingClientRect();
-    const targetRect = target.getBoundingClientRect();
-    const tipWidth = tooltip.offsetWidth || 172;
-    const tipHeight = tooltip.offsetHeight || 96;
-    const left = Math.min(Math.max(targetRect.left - rect.left + targetRect.width / 2 - tipWidth / 2, 8), Math.max(8, visual.clientWidth - tipWidth - 8));
-    const top = Math.min(Math.max(targetRect.top - rect.top + targetRect.height / 2 - tipHeight / 2, 8), Math.max(8, visual.clientHeight - tipHeight - 8));
-    tooltip.style.left = `${left}px`;
-    tooltip.style.top = `${top}px`;
+    showAnchoredTooltip(target, (node) => this.renderLineTooltip(node, month), visual, {
+      tooltip,
+      placement: 'center',
+      fallbackWidth: 172,
+      fallbackHeight: 96
+    });
     marker.classList.add('is-visible');
-    tooltip.classList.add('is-visible');
   }
 
   renderLineTooltip(tooltip, month) {
@@ -2704,7 +2896,6 @@ class TaskModal extends Modal {
       .addButton((button) => button.setButtonText('取消').onClick(() => this.close()))
       .addButton((button) => button.setButtonText(editing ? '保存修改' : '保存任务').setCta().onClick(async () => {
       if (!clean(name.value)) return new Notice('任务名称不能为空');
-      if (!clean(issue.value)) return new Notice('关联 issue 不能为空');
       if (!category.value) return new Notice('请先在插件设置中启用至少一个任务类型');
       const patch = { name: clean(name.value), project: clean(project.value), category: category.value, issue: clean(issue.value), plannedHours: toNumber(planned.value) };
       if (patch.plannedHours <= 0) return new Notice('计划工时必须大于 0');
@@ -2843,6 +3034,37 @@ class LogModal extends Modal {
       input.value = value;
     });
     return input;
+  }
+}
+
+class LogDetailModal extends Modal {
+  constructor(app, log, task = null) {
+    super(app);
+    this.log = isPlainObject(log) ? log : {};
+    this.task = isPlainObject(task) ? task : null;
+  }
+
+  onOpen() {
+    this.modalEl.addClass('worklog-modal');
+    this.modalEl.addClass('worklog-log-detail-modal');
+    this.setTitle('工时记录详情');
+    addModalTitleBadge(this.modalEl, clean(this.log.date));
+    const content = this.contentEl;
+    const meta = content.createDiv({ cls: 'worklog-log-detail-meta' });
+    [
+      ['日期', clean(this.log.date) || '-'],
+      ['任务', this.task ? clean(this.task.name) : '未找到任务'],
+      ['工时', `${formatHours(this.log.hours)}h`],
+      ['issue', clean(this.log.issueLink || (this.task ? this.task.issue : '')) || '-']
+    ].forEach(([label, value]) => {
+      const item = meta.createDiv({ cls: 'worklog-log-detail-meta-item' });
+      item.createSpan({ text: label });
+      item.createEl('strong', { text: value });
+    });
+    const work = content.createDiv({ cls: 'worklog-log-detail-work' });
+    work.createEl('span', { text: '工作内容' });
+    work.createEl('p', { text: clean(this.log.work) || '-' });
+    new Setting(content).addButton((button) => button.setButtonText('关闭').setCta().onClick(() => this.close()));
   }
 }
 
@@ -3206,3 +3428,37 @@ class WorklogSettingTab extends PluginSettingTab {
 }
 
 module.exports = WorklogPlugin;
+module.exports.__test__ = {
+  WORKLOG_SCHEMA_VERSION,
+  clean,
+  isPlainObject,
+  arrayOrEmpty,
+  todayIsoFromDate,
+  isValidMonth,
+  isValidDate,
+  normalizeDate,
+  toNumber,
+  formatHours,
+  normalizeSettings,
+  normalizeTaskTypes,
+  normalizeTaskTemplates,
+  defaultData,
+  migrateData,
+  normalizeData,
+  buildCalendarCells,
+  deriveWorklogData,
+  taskStatusCounts,
+  taskTypeRowsForData,
+  projectRowsForScope,
+  yearSummary,
+  markdownCell,
+  markdownTable,
+  buildMonthlyReportContent,
+  buildMonthlyReportContext,
+  buildAnnualReportContent,
+  buildAnnualReportContext,
+  clampNumber,
+  positionAnchoredTooltip,
+  showAnchoredTooltip,
+  hideAnchoredTooltip
+};
