@@ -662,6 +662,18 @@ function addModalTitleBadge(modalEl, text) {
   }));
 }
 
+function setButtonBusy(button, busy, label, busyLabel = '保存中...') {
+  if (!button) return;
+  if (typeof button.setButtonText === 'function') button.setButtonText(busy ? busyLabel : label);
+  if (typeof button.setDisabled === 'function') button.setDisabled(busy);
+  else if (button.buttonEl) button.buttonEl.disabled = busy;
+}
+
+function saveErrorMessage(error) {
+  const message = clean(error && error.message);
+  return message || '请稍后重试';
+}
+
 function hideAnchoredTooltip(tooltip) {
   if (!tooltip || !tooltip.classList) return;
   tooltip.classList.remove('is-visible');
@@ -1266,6 +1278,8 @@ class JumpWorklogYearModal extends Modal {
 
 class WorklogPlugin extends Plugin {
   async onload() {
+    this.writeLocks = new Map();
+    this.internalWritePaths = new Map();
     this.settings = await this.loadSettings();
     await this.saveSettings();
     this.registerView(VIEW_TYPE, (leaf) => new WorklogView(leaf, this));
@@ -1342,16 +1356,34 @@ class WorklogPlugin extends Plugin {
   }
 
   async handleDataFileModify(file) {
-    const month = this.monthFromDataPath(file.path || '');
+    const path = file.path || '';
+    if (this.shouldSkipInternalModify(path)) return;
+    const month = this.monthFromDataPath(path);
     if (!month) return;
     this.refreshMonthViews(month);
     this.refreshYearDashboards();
   }
 
-  refreshMonthViews(month) {
+  shouldSkipInternalModify(path) {
+    const expiresAt = this.internalWritePaths && this.internalWritePaths.get(path);
+    if (!expiresAt) return false;
+    if (Date.now() <= expiresAt) {
+      this.internalWritePaths.delete(path);
+      return true;
+    }
+    this.internalWritePaths.delete(path);
+    return false;
+  }
+
+  markInternalWrite(path) {
+    if (!this.internalWritePaths) this.internalWritePaths = new Map();
+    this.internalWritePaths.set(path, Date.now() + 2000);
+  }
+
+  refreshMonthViews(month, exceptView = null) {
     this.app.workspace.getLeavesOfType(VIEW_TYPE).forEach((leaf) => {
       const view = leaf.view;
-      if (view && view.month === month && typeof view.load === 'function') view.load();
+      if (view && view !== exceptView && view.month === month && typeof view.load === 'function') view.load();
     });
   }
 
@@ -1425,8 +1457,7 @@ class WorklogPlugin extends Plugin {
       }
     }
     const data = defaultData(targetMonth, this.settings);
-    await this.app.vault.adapter.write(path, JSON.stringify(data, null, 2));
-    return data;
+    return this.writeVerifiedData(path, targetMonth, JSON.stringify(data, null, 2));
   }
 
   async dataFiles() {
@@ -1527,15 +1558,77 @@ class WorklogPlugin extends Plugin {
     return items.filter(Boolean);
   }
 
+  tmpDataPath(path) {
+    const folder = parentPath(path);
+    const name = clean(path).split('/').filter(Boolean).pop() || 'worklog.json';
+    return folder ? `${folder}/.${name}.tmp` : `.${name}.tmp`;
+  }
+
+  async removeAdapterFile(path) {
+    if (!path || typeof this.app.vault.adapter.remove !== 'function') return;
+    try {
+      if (await this.app.vault.adapter.exists(path)) await this.app.vault.adapter.remove(path);
+    } catch (error) {
+      console.warn(`Worklog: failed to remove temporary file ${path}`, error);
+    }
+  }
+
+  async readVerifiedData(path, month) {
+    const content = await this.app.vault.adapter.read(path);
+    if (!clean(content)) throw new Error(`写入校验失败：${path} 为空`);
+    const parsed = JSON.parse(content);
+    if (!isPlainObject(parsed)) throw new Error(`写入校验失败：${path} 不是有效对象`);
+    if (parsed.month !== month) throw new Error(`写入校验失败：月份不匹配`);
+    if (!Array.isArray(parsed.tasks) || !Array.isArray(parsed.logs)) throw new Error('写入校验失败：任务或工时结构异常');
+    if (!isPlainObject(parsed.dailyStatus) || !Array.isArray(parsed.dailyStatus.completedDates)) throw new Error('写入校验失败：每日状态结构异常');
+    return normalizeData(parsed, month, this.settings);
+  }
+
+  async writeVerifiedData(path, month, content) {
+    const tmpPath = this.tmpDataPath(path);
+    let renamed = false;
+    try {
+      await this.app.vault.adapter.write(tmpPath, content);
+      await this.readVerifiedData(tmpPath, month);
+      if (typeof this.app.vault.adapter.rename === 'function') {
+        try {
+          this.markInternalWrite(path);
+          await this.app.vault.adapter.rename(tmpPath, path);
+          renamed = true;
+        } catch (error) {
+          console.warn(`Worklog: atomic rename failed for ${path}, falling back to direct write`, error);
+        }
+      }
+      if (!renamed) {
+        this.markInternalWrite(path);
+        await this.app.vault.adapter.write(path, content);
+      }
+      const verified = await this.readVerifiedData(path, month);
+      if (!renamed) await this.removeAdapterFile(tmpPath);
+      return verified;
+    } catch (error) {
+      if (!renamed) await this.removeAdapterFile(tmpPath);
+      throw error;
+    }
+  }
+
   async writeData(data) {
     const month = isValidMonth(data.month) ? data.month : currentMonth();
-    await this.ensureAdapterFolder(this.monthDataFolder(month));
-    const path = this.dataPath(month);
-    const next = normalizeData(Object.assign({}, data, { updatedAt: new Date().toISOString() }), month, this.settings);
-    await this.app.vault.adapter.write(path, JSON.stringify(next, null, 2));
-    this.refreshMonthViews(month);
-    this.refreshYearDashboards();
-    return next;
+    if (!this.writeLocks) this.writeLocks = new Map();
+    if (this.writeLocks.has(month)) throw new Error(`${month} 正在保存，请稍后再试`);
+    const write = (async () => {
+      await this.ensureAdapterFolder(this.monthDataFolder(month));
+      const path = this.dataPath(month);
+      const next = normalizeData(Object.assign({}, data, { updatedAt: new Date().toISOString() }), month, this.settings);
+      const content = JSON.stringify(next, null, 2);
+      return this.writeVerifiedData(path, month, content);
+    })();
+    this.writeLocks.set(month, write);
+    try {
+      return await write;
+    } finally {
+      if (this.writeLocks.get(month) === write) this.writeLocks.delete(month);
+    }
   }
 
   shouldCreateReports() {
@@ -1637,15 +1730,39 @@ class WorklogPlugin extends Plugin {
     return file;
   }
 
+  async waitForLayoutReady() {
+    if (!this.app.workspace || typeof this.app.workspace.onLayoutReady !== 'function') return;
+    await new Promise((resolve) => this.app.workspace.onLayoutReady(resolve));
+  }
+
+  async waitForNextFrame() {
+    if (typeof window === 'undefined' || typeof window.requestAnimationFrame !== 'function') return;
+    await new Promise((resolve) => window.requestAnimationFrame(() => resolve()));
+  }
+
+  existingLeaf(type, predicate = () => true) {
+    const leaves = this.app.workspace.getLeavesOfType(type);
+    return leaves.find((leaf) => leaf.view && predicate(leaf.view)) || null;
+  }
+
+  async rerenderRevealedLeaf(leaf) {
+    await this.waitForNextFrame();
+    await this.waitForNextFrame();
+    const view = leaf && leaf.view;
+    if (view && view.data && typeof view.render === 'function') view.render();
+  }
+
   async openView(month = currentMonth()) {
     if (!isValidMonth(month)) {
       new Notice(`无效月份：${month}`);
       return;
     }
+    await this.waitForLayoutReady();
     await this.readData(month);
-    const leaf = this.app.workspace.getLeaf(false);
+    const leaf = this.existingLeaf(VIEW_TYPE, (view) => view.month === month) || this.app.workspace.getLeaf(false);
     await leaf.setViewState({ type: VIEW_TYPE, active: true, state: { month } });
     this.app.workspace.revealLeaf(leaf);
+    await this.rerenderRevealedLeaf(leaf);
   }
 
   async createMonthDashboard(month = currentMonth()) {
@@ -1653,10 +1770,12 @@ class WorklogPlugin extends Plugin {
       new Notice(`无效月份：${month}`);
       return;
     }
+    await this.waitForLayoutReady();
     await this.readData(month);
-    const leaf = this.app.workspace.getLeaf(false);
+    const leaf = this.existingLeaf(VIEW_TYPE, (view) => view.month === month) || this.app.workspace.getLeaf(false);
     await leaf.setViewState({ type: VIEW_TYPE, active: true, state: { month } });
     this.app.workspace.revealLeaf(leaf);
+    await this.rerenderRevealedLeaf(leaf);
     new Notice(`已创建 ${month} 工时工作台`);
   }
 
@@ -1684,9 +1803,11 @@ class WorklogPlugin extends Plugin {
 
   async openYearDashboard(year = currentYear()) {
     const targetYear = normalizeYear(year) || currentYear();
-    const leaf = this.app.workspace.getLeaf(false);
+    await this.waitForLayoutReady();
+    const leaf = this.existingLeaf(YEAR_VIEW_TYPE, (view) => view.selectedYear === targetYear) || this.app.workspace.getLeaf(false);
     await leaf.setViewState({ type: YEAR_VIEW_TYPE, active: true, state: { year: targetYear } });
     this.app.workspace.revealLeaf(leaf);
+    await this.rerenderRevealedLeaf(leaf);
   }
 }
 
@@ -1729,13 +1850,19 @@ class WorklogView extends ItemView {
   }
 
   async load() {
-    this.data = await this.plugin.readData(this.month);
+    this.loadToken = (this.loadToken || 0) + 1;
+    const token = this.loadToken;
+    const data = await this.plugin.readData(this.month);
+    if (token !== this.loadToken) return;
+    this.data = data;
     this.render();
   }
 
   async save(next) {
     this.data = await this.plugin.writeData(next);
     this.render();
+    this.plugin.refreshMonthViews(this.data.month, this);
+    this.plugin.refreshYearDashboards();
   }
 
   derived() {
@@ -2892,31 +3019,47 @@ class TaskModal extends Modal {
     const category = this.addSelect('任务类型', categoryOptions, this.editingTask?.category || '');
     const planned = this.addInput('计划工时', editing ? String(this.editingTask.plannedHours || '') : '8', 'number');
     const issue = this.addInput('关联 issue', this.editingTask?.issue || '');
+    const saveLabel = editing ? '保存修改' : '保存任务';
+    let saving = false;
     new Setting(form)
       .addButton((button) => button.setButtonText('取消').onClick(() => this.close()))
-      .addButton((button) => button.setButtonText(editing ? '保存修改' : '保存任务').setCta().onClick(async () => {
-      if (!clean(name.value)) return new Notice('任务名称不能为空');
-      if (!category.value) return new Notice('请先在插件设置中启用至少一个任务类型');
-      const patch = { name: clean(name.value), project: clean(project.value), category: category.value, issue: clean(issue.value), plannedHours: toNumber(planned.value) };
-      if (patch.plannedHours <= 0) return new Notice('计划工时必须大于 0');
-      if (editing) {
-        const tasks = this.view.data.tasks.slice();
-        const fallbackIndex = this.taskIndex >= 0 ? this.taskIndex : -1;
-        const taskIndex = tasks.findIndex((item) => item.id === this.editingTask.id);
-        const updateIndex = taskIndex >= 0 ? taskIndex : fallbackIndex;
-        if (updateIndex < 0 || !tasks[updateIndex]) return new Notice('未找到要编辑的任务');
-        const task = Object.assign({}, tasks[updateIndex], patch);
-        tasks[updateIndex] = task;
-        await this.view.save(Object.assign({}, this.view.data, { tasks }));
-        new Notice(`已更新任务：${task.name}`);
-      } else {
-        const taskId = nextTaskId(this.view.data.tasks, this.view.data.month, `${this.view.data.month}-01`);
-        const task = Object.assign({ id: taskId, status: 'doing' }, patch);
-        await this.view.save(Object.assign({}, this.view.data, { tasks: this.view.data.tasks.concat(task) }));
-        new Notice(`已新增任务：${task.name}`);
-      }
-      this.close();
-    }));
+      .addButton((button) => button.setButtonText(saveLabel).setCta().onClick(async () => {
+        if (saving) return;
+        if (!clean(name.value)) return new Notice('任务名称不能为空');
+        if (!category.value) return new Notice('请先在插件设置中启用至少一个任务类型');
+        const patch = { name: clean(name.value), project: clean(project.value), category: category.value, issue: clean(issue.value), plannedHours: toNumber(planned.value) };
+        if (patch.plannedHours <= 0) return new Notice('计划工时必须大于 0');
+        saving = true;
+        setButtonBusy(button, true, saveLabel);
+        try {
+          if (editing) {
+            const tasks = this.view.data.tasks.slice();
+            const fallbackIndex = this.taskIndex >= 0 ? this.taskIndex : -1;
+            const taskIndex = tasks.findIndex((item) => item.id === this.editingTask.id);
+            const updateIndex = taskIndex >= 0 ? taskIndex : fallbackIndex;
+            if (updateIndex < 0 || !tasks[updateIndex]) {
+              new Notice('未找到要编辑的任务');
+              return;
+            }
+            const task = Object.assign({}, tasks[updateIndex], patch);
+            tasks[updateIndex] = task;
+            await this.view.save(Object.assign({}, this.view.data, { tasks }));
+            new Notice(`已更新任务：${task.name}`);
+          } else {
+            const taskId = nextTaskId(this.view.data.tasks, this.view.data.month, `${this.view.data.month}-01`);
+            const task = Object.assign({ id: taskId, status: 'doing' }, patch);
+            await this.view.save(Object.assign({}, this.view.data, { tasks: this.view.data.tasks.concat(task) }));
+            new Notice(`已新增任务：${task.name}`);
+          }
+          this.close();
+        } catch (error) {
+          console.error('Worklog: failed to save task', error);
+          new Notice(`保存失败：${saveErrorMessage(error)}`);
+        } finally {
+          saving = false;
+          setButtonBusy(button, false, saveLabel);
+        }
+      }));
   }
 
   addInput(label, value = '', type = 'text') {
@@ -2978,33 +3121,46 @@ class LogModal extends Modal {
     };
     taskSelect.addEventListener('change', syncIssueFromTask);
     if (!editing) syncIssueFromTask();
+    const saveLabel = editing ? '保存修改' : '保存工时';
+    let saving = false;
     new Setting(this.contentEl)
       .addButton((button) => button.setButtonText('取消').onClick(() => this.close()))
-      .addButton((button) => button.setButtonText(editing ? '保存修改' : '保存工时').setCta().onClick(async () => {
-      const task = this.view.data.tasks.find((item) => item.id === taskSelect.value);
-      if (!task) return new Notice('请选择任务');
-      const logDate = normalizeDate(date.value, this.view.data.month);
-      if (!logDate) return new Notice(`日期必须是 ${this.view.data.month} 内的有效日期`);
-      if (hasLogForTaskDate(this.view.data.logs, task.id, logDate, this.editingLog?.id || '')) return new Notice(`当天已登记过该任务：${task.name}`);
-      const category = categoriesForData(this.view.data).find((item) => item.id === task.category);
-      if (category && category.requiresLogIssue && !clean(issue.value)) return new Notice('该任务类型必须填写关联 issue');
-      if (!clean(work.value)) return new Notice('工作内容不能为空');
-      const log = {
-        id: this.editingLog?.id || `log-${Date.now().toString(36)}`,
-        date: logDate,
-        taskId: task.id,
-        hours: toNumber(hours.value),
-        work: clean(work.value),
-        issueLink: clean(issue.value)
-      };
-      if (log.hours <= 0) return new Notice('工时必须大于 0');
-      const logs = editing
-        ? this.view.data.logs.map((item) => item.id === log.id ? log : item)
-        : this.view.data.logs.concat(log);
-      await this.view.save(Object.assign({}, this.view.data, { logs }));
-      new Notice(editing ? '已更新工时记录' : `已登记 ${formatHours(log.hours)}h`);
-      this.close();
-    }));
+      .addButton((button) => button.setButtonText(saveLabel).setCta().onClick(async () => {
+        if (saving) return;
+        const task = this.view.data.tasks.find((item) => item.id === taskSelect.value);
+        if (!task) return new Notice('请选择任务');
+        const logDate = normalizeDate(date.value, this.view.data.month);
+        if (!logDate) return new Notice(`日期必须是 ${this.view.data.month} 内的有效日期`);
+        if (hasLogForTaskDate(this.view.data.logs, task.id, logDate, this.editingLog?.id || '')) return new Notice(`当天已登记过该任务：${task.name}`);
+        const category = categoriesForData(this.view.data).find((item) => item.id === task.category);
+        if (category && category.requiresLogIssue && !clean(issue.value)) return new Notice('该任务类型必须填写关联 issue');
+        if (!clean(work.value)) return new Notice('工作内容不能为空');
+        const log = {
+          id: this.editingLog?.id || `log-${Date.now().toString(36)}`,
+          date: logDate,
+          taskId: task.id,
+          hours: toNumber(hours.value),
+          work: clean(work.value),
+          issueLink: clean(issue.value)
+        };
+        if (log.hours <= 0) return new Notice('工时必须大于 0');
+        saving = true;
+        setButtonBusy(button, true, saveLabel);
+        try {
+          const logs = editing
+            ? this.view.data.logs.map((item) => item.id === log.id ? log : item)
+            : this.view.data.logs.concat(log);
+          await this.view.save(Object.assign({}, this.view.data, { logs }));
+          new Notice(editing ? '已更新工时记录' : `已登记 ${formatHours(log.hours)}h`);
+          this.close();
+        } catch (error) {
+          console.error('Worklog: failed to save log', error);
+          new Notice(`保存失败：${saveErrorMessage(error)}`);
+        } finally {
+          saving = false;
+          setButtonBusy(button, false, saveLabel);
+        }
+      }));
   }
 
   addTaskSelect(value = '') {
