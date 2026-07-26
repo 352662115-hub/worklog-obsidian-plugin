@@ -5,6 +5,8 @@ const YEAR_VIEW_TYPE = 'worklog-year-view';
 const CONFIG_FILE_NAME = 'config.json';
 const DATA_FOLDER_NAME = 'data';
 const WORKLOG_SCHEMA_VERSION = 2;
+const REPORT_LABEL = '总结报告';
+const LEGACY_REPORT_LABEL = '终结报告';
 const DEFAULT_SETTINGS = {
   worklogFolder: 'worklog',
   dataFolder: '',
@@ -21,7 +23,7 @@ data: {{dataPath}}
 created: {{createdAt}}
 ---
 
-# {{monthTitle}}月度终结报告
+# {{monthTitle}}月度总结报告
 
 > 本报告由 Worklog 插件在每月 1 日读取上月数据创建。报告只读取数据，不会修改源 JSON；报告创建后不会被插件覆盖，可以直接在本文继续补充复盘内容。
 
@@ -69,7 +71,7 @@ dataFolder: {{dataFolder}}
 created: {{createdAt}}
 ---
 
-# {{year}} 年度终结报告
+# {{year}} 年度总结报告
 
 > 本报告由 Worklog 插件在每年 1 月 1 日读取上一年度数据创建。报告只读取数据，不会修改源 JSON；报告创建后不会被插件覆盖，可以直接在本文继续补充复盘内容。
 
@@ -262,6 +264,18 @@ function parentPath(path) {
   const parts = clean(path).split('/').filter(Boolean);
   parts.pop();
   return parts.join('/');
+}
+
+function legacyReportTargetPath(path) {
+  const source = clean(path);
+  const name = source.split('/').pop();
+  if (!name) return '';
+  const isKnownLegacyReport =
+    name === `月度${LEGACY_REPORT_LABEL}模板.md` ||
+    name === `年度${LEGACY_REPORT_LABEL}模板.md` ||
+    /^20\d{2}-\d{2} 月度终结报告\.md$/.test(name) ||
+    /^20\d{2} 年度终结报告\.md$/.test(name);
+  return isKnownLegacyReport ? source.replaceAll(LEGACY_REPORT_LABEL, REPORT_LABEL) : '';
 }
 
 function toNumber(value) {
@@ -1292,6 +1306,7 @@ class WorklogPlugin extends Plugin {
     this.addCommand({ id: 'jump-worklog-year', name: '跳转到年度工时看板', callback: async () => new JumpWorklogYearModal(this.app, this, await this.availableYears()).open() });
     this.addCommand({ id: 'open-worklog-year-dashboard', name: '打开年度工时看板', callback: () => this.openYearDashboard() });
     this.addSettingTab(new WorklogSettingTab(this.app, this));
+    await this.migrateLegacyReportNames();
     await this.maybeCreateReports();
     if (typeof window !== 'undefined') {
       this.registerInterval(window.setInterval(() => this.maybeCreateReports(), 60 * 60 * 1000));
@@ -1409,20 +1424,20 @@ class WorklogPlugin extends Plugin {
 
   monthlyReportPath(month) {
     const targetMonth = isValidMonth(month) ? month : currentMonth();
-    return `${this.reportYearFolder(targetMonth.slice(0, 4))}/${targetMonth} 月度终结报告.md`;
+    return `${this.reportYearFolder(targetMonth.slice(0, 4))}/${targetMonth} 月度${REPORT_LABEL}.md`;
   }
 
   annualReportPath(year) {
     const targetYear = normalizeYear(year) || currentYear();
-    return `${this.reportYearFolder(targetYear)}/${targetYear} 年度终结报告.md`;
+    return `${this.reportYearFolder(targetYear)}/${targetYear} 年度${REPORT_LABEL}.md`;
   }
 
   monthlyReportTemplatePath() {
-    return `${this.reportFolder()}/月度终结报告模板.md`;
+    return `${this.reportFolder()}/月度${REPORT_LABEL}模板.md`;
   }
 
   annualReportTemplatePath() {
-    return `${this.reportFolder()}/年度终结报告模板.md`;
+    return `${this.reportFolder()}/年度${REPORT_LABEL}模板.md`;
   }
 
   async ensureFolder(folder) {
@@ -1519,8 +1534,41 @@ class WorklogPlugin extends Plugin {
     const migrated = await this.copyFolderFiles(previousFolder, nextFolder, (path) => path.endsWith('.md'));
     this.settings.worklogFolder = nextFolder;
     await this.saveSettings();
-    await this.ensureReportTemplates();
-    new Notice(`已保存终结报告目录，迁移 ${migrated.copied} 个文件${migrated.skipped ? `，跳过 ${migrated.skipped} 个已存在文件` : ''}`);
+    const templates = await this.ensureReportTemplates(true);
+    new Notice(`已保存总结报告目录，迁移 ${migrated.copied} 个文件${migrated.skipped ? `，跳过 ${migrated.skipped} 个已存在文件` : ''}${templates.legacy.renamed ? `，重命名 ${templates.legacy.renamed} 个旧报告文件` : ''}${templates.legacy.conflicts ? `，${templates.legacy.conflicts} 个重名文件需手动检查` : ''}`);
+  }
+
+  async migrateLegacyReportNames(showNotice = false) {
+    const result = { renamed: 0, conflicts: 0, skipped: 0 };
+    const files = await this.adapterFiles(this.reportFolder());
+    for (const path of files) {
+      const nextPath = legacyReportTargetPath(path);
+      if (!nextPath || nextPath === path) continue;
+      if (await this.app.vault.adapter.exists(nextPath)) {
+        result.conflicts += 1;
+        continue;
+      }
+      try {
+        const folder = parentPath(nextPath);
+        if (folder) await this.ensureAdapterFolder(folder);
+        const file = this.app.vault.getAbstractFileByPath(path);
+        if (file && typeof this.app.vault.rename === 'function') {
+          await this.app.vault.rename(file, nextPath);
+          result.renamed += 1;
+          continue;
+        }
+        if (typeof this.app.vault.adapter.rename === 'function') {
+          await this.app.vault.adapter.rename(path, nextPath);
+          result.renamed += 1;
+          continue;
+        }
+      } catch (error) {
+        console.warn(`Worklog: failed to rename legacy report ${path}`, error);
+      }
+      result.skipped += 1;
+    }
+    if (showNotice && result.conflicts) new Notice(`发现 ${result.conflicts} 个旧总结报告文件与新文件重名，已保留，请手动检查。`);
+    return result;
   }
 
   async readExistingData(path) {
@@ -1645,19 +1693,20 @@ class WorklogPlugin extends Plugin {
 
   async maybeCreateReports(showNotice = false) {
     if (!this.shouldCreateReports()) return { monthly: null, annual: null };
-    await this.ensureReportTemplates();
+    await this.ensureReportTemplates(showNotice);
     const month = this.monthlyReportTargetMonth();
     const year = this.annualReportTargetYear();
     const monthly = month ? await this.createMonthlyReport(month, showNotice) : null;
     const annual = year ? await this.createAnnualReport(year, showNotice) : null;
-    if (showNotice && !month && !year) new Notice('已开启终结报告；月报会在每月 1 日生成，年报会在每年 1 月 1 日生成。');
+    if (showNotice && !month && !year) new Notice('已开启总结报告；月报会在每月 1 日生成，年报会在每年 1 月 1 日生成。');
     return { monthly, annual };
   }
 
-  async ensureReportTemplates() {
+  async ensureReportTemplates(showNotice = false) {
+    const legacy = await this.migrateLegacyReportNames(showNotice);
     const monthly = await this.ensureMonthlyReportTemplate();
     const annual = await this.ensureAnnualReportTemplate();
-    return { monthly, annual };
+    return { monthly, annual, legacy };
   }
 
   async ensureMonthlyReportTemplate() {
@@ -1683,12 +1732,12 @@ class WorklogPlugin extends Plugin {
     const path = this.monthlyReportPath(targetMonth);
     const existing = this.app.vault.getAbstractFileByPath(path);
     if (existing) {
-      if (showNotice) new Notice(`${targetMonth} 月度终结报告已存在`);
+      if (showNotice) new Notice(`${targetMonth} 月度总结报告已存在`);
       return existing;
     }
     const existingData = await this.readExistingMonthData(targetMonth);
     if (!existingData) {
-      if (showNotice) new Notice(`${targetMonth} 没有工时数据，未创建月度终结报告`);
+      if (showNotice) new Notice(`${targetMonth} 没有工时数据，未创建月度总结报告`);
       return null;
     }
     let template = DEFAULT_MONTHLY_REPORT_TEMPLATE;
@@ -1699,7 +1748,7 @@ class WorklogPlugin extends Plugin {
     }
     const content = buildMonthlyReportContent(existingData.data, existingData.path, template);
     const file = await this.app.vault.create(path, content);
-    if (showNotice) new Notice(`已创建 ${targetMonth} 月度终结报告`);
+    if (showNotice) new Notice(`已创建 ${targetMonth} 月度总结报告`);
     return file;
   }
 
@@ -1710,12 +1759,12 @@ class WorklogPlugin extends Plugin {
     const path = this.annualReportPath(targetYear);
     const existing = this.app.vault.getAbstractFileByPath(path);
     if (existing) {
-      if (showNotice) new Notice(`${targetYear} 年度终结报告已存在`);
+      if (showNotice) new Notice(`${targetYear} 年度总结报告已存在`);
       return existing;
     }
     const yearData = await this.readExistingYearData(targetYear);
     if (!yearData.length) {
-      if (showNotice) new Notice(`${targetYear} 年没有工时数据，未创建年度终结报告`);
+      if (showNotice) new Notice(`${targetYear} 年没有工时数据，未创建年度总结报告`);
       return null;
     }
     let template = DEFAULT_ANNUAL_REPORT_TEMPLATE;
@@ -1726,7 +1775,7 @@ class WorklogPlugin extends Plugin {
     }
     const content = buildAnnualReportContent(yearData, targetYear, this.dataFolder(), template);
     const file = await this.app.vault.create(path, content);
-    if (showNotice) new Notice(`已创建 ${targetYear} 年度终结报告`);
+    if (showNotice) new Notice(`已创建 ${targetYear} 年度总结报告`);
     return file;
   }
 
@@ -3239,7 +3288,7 @@ class WorklogSettingTab extends PluginSettingTab {
     const header = shell.createDiv({ cls: 'worklog-settings-header' });
     const title = header.createDiv({ cls: 'worklog-title-block' });
     title.createEl('h2', { text: 'Worklog 插件设置' });
-    title.createEl('p', { text: '任务类型、默认任务模板、数据目录和终结报告都可以在这里维护。' });
+    title.createEl('p', { text: '任务类型、默认任务模板、数据目录和总结报告都可以在这里维护。' });
     const headerActions = header.createDiv({ cls: 'worklog-settings-actions' });
     const addTypeButton = headerActions.createEl('button', { cls: 'worklog-button primary', text: '新增任务类型' });
     addTypeButton.addEventListener('click', async () => {
@@ -3272,24 +3321,23 @@ class WorklogSettingTab extends PluginSettingTab {
 
     const configGrid = shell.createDiv({ cls: 'worklog-settings-config-grid' });
     const syncPanel = configGrid.createDiv({ cls: 'worklog-settings-panel worklog-settings-config-panel' });
-    syncPanel.createEl('h3', { text: '终结报告' });
+    syncPanel.createEl('h3', { text: '总结报告' });
     new Setting(syncPanel)
       .setName('自动创建月度 / 年度总结')
-      .setDesc('开启后会创建“月度终结报告模板.md”和“年度终结报告模板.md”；每月 1 日读取上个月数据生成月度总结，每年 1 月 1 日读取上一年度数据生成年度总结。')
+      .setDesc('开启后会创建“月度总结报告模板.md”和“年度总结报告模板.md”；每月 1 日读取上个月数据生成月度总结，每年 1 月 1 日读取上一年度数据生成年度总结。')
       .addToggle((toggle) => toggle.setValue(!!this.plugin.settings.createMonthlyReport).onChange(async (value) => {
         this.plugin.settings.createMonthlyReport = value;
         await this.plugin.saveSettings();
         if (value) {
-          await this.plugin.ensureReportTemplates();
           await this.plugin.maybeCreateReports(true);
         } else {
-          new Notice('已关闭终结报告自动创建');
+          new Notice('已关闭总结报告自动创建');
         }
       }));
     let reportFolderValue = this.plugin.settings.worklogFolder;
     new Setting(syncPanel)
       .setClass('worklog-path-setting')
-      .setName('终结报告目录')
+      .setName('总结报告目录')
       .setDesc('修改后点击“保存并迁移”，会把原目录中的报告和模板复制到新目录；原目录文件会保留。')
       .addText((text) => text.setValue(reportFolderValue).onChange((value) => {
         reportFolderValue = normalizeFolderPath(value) || DEFAULT_SETTINGS.worklogFolder;
@@ -3614,6 +3662,7 @@ module.exports.__test__ = {
   buildAnnualReportContent,
   buildAnnualReportContext,
   clampNumber,
+  legacyReportTargetPath,
   positionAnchoredTooltip,
   showAnchoredTooltip,
   hideAnchoredTooltip

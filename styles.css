@@ -2521,8 +2521,15 @@ button.worklog-pie-legend-arrow:disabled {
 }
 
 .worklog-settings-config-panel .setting-item {
-  margin: 0 16px;
-  border-top: 1px solid var(--worklog-border);
+  margin: 0 16px 12px;
+  padding: 16px;
+  border: 1px solid var(--worklog-border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--background-secondary) 68%, var(--background-primary));
+}
+
+.worklog-settings-config-panel .setting-item:last-child {
+  margin-bottom: 0;
 }
 
 .worklog-settings-config-panel .worklog-path-setting {
@@ -2530,7 +2537,7 @@ button.worklog-pie-legend-arrow:disabled {
   grid-template-columns: minmax(0, 1fr);
   gap: 12px;
   align-items: stretch;
-  padding: 16px 0;
+  padding: 16px;
 }
 
 .worklog-path-setting .setting-item-info {

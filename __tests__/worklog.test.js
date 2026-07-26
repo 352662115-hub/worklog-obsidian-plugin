@@ -10,6 +10,7 @@ const {
   deriveWorklogData,
   buildMonthlyReportContent,
   buildAnnualReportContent,
+  legacyReportTargetPath,
   isValidDate,
   normalizeDate
 } = WorklogPlugin.__test__;
@@ -118,7 +119,7 @@ describe('report markdown generation', () => {
   test('builds monthly report with escaped table pipes and empty fallbacks', () => {
     const report = buildMonthlyReportContent(sampleData(), 'worklog/data/2026/2026-07.json');
 
-    expect(report).toContain('# 2026 年 7 月月度终结报告');
+    expect(report).toContain('# 2026 年 7 月月度总结报告');
     expect(report).toContain('实现 A\\|B');
     expect(report).toContain('| 计划工时 | 12.5h |');
   });
@@ -126,7 +127,7 @@ describe('report markdown generation', () => {
   test('builds annual report from normalized monthly items', () => {
     const report = buildAnnualReportContent([{ data: sampleData() }], '2026', 'worklog/data');
 
-    expect(report).toContain('# 2026 年度终结报告');
+    expect(report).toContain('# 2026 年度总结报告');
     expect(report).toContain('| 统计月份 | 1 个月 |');
     expect(report).toContain('| 2026-07 | 12.5h | 5.5h | -7h | 2 个 | 2 条 |');
   });
@@ -136,5 +137,15 @@ describe('report markdown generation', () => {
 
     expect(report).toContain('暂无月度数据。');
     expect(report).toContain('| 记录数 | 0 条 |');
+  });
+});
+
+describe('legacy report name migration', () => {
+  test('maps known legacy report filenames to summary report filenames', () => {
+    expect(legacyReportTargetPath('worklog/月度终结报告模板.md')).toBe('worklog/月度总结报告模板.md');
+    expect(legacyReportTargetPath('worklog/年度终结报告模板.md')).toBe('worklog/年度总结报告模板.md');
+    expect(legacyReportTargetPath('worklog/2026/2026-07 月度终结报告.md')).toBe('worklog/2026/2026-07 月度总结报告.md');
+    expect(legacyReportTargetPath('worklog/2026/2026 年度终结报告.md')).toBe('worklog/2026/2026 年度总结报告.md');
+    expect(legacyReportTargetPath('worklog/随手终结报告.md')).toBe('');
   });
 });
