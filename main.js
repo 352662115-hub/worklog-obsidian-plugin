@@ -7,6 +7,8 @@ const DATA_FOLDER_NAME = 'data';
 const WORKLOG_SCHEMA_VERSION = 2;
 const REPORT_LABEL = '总结报告';
 const LEGACY_REPORT_LABEL = '终结报告';
+const STABLE_RENDER_RETRY_DELAYS = [120, 360, 900];
+const RESTORED_VIEW_STABILIZE_DELAYS = [120, 360, 900];
 const DEFAULT_SETTINGS = {
   worklogFolder: 'worklog',
   dataFolder: '',
@@ -1308,6 +1310,7 @@ class WorklogPlugin extends Plugin {
     this.addSettingTab(new WorklogSettingTab(this.app, this));
     await this.migrateLegacyReportNames();
     await this.maybeCreateReports();
+    this.refreshRestoredViewsAfterLayout();
     if (typeof window !== 'undefined') {
       this.registerInterval(window.setInterval(() => this.maybeCreateReports(), 60 * 60 * 1000));
     }
@@ -1415,6 +1418,30 @@ class WorklogPlugin extends Plugin {
       if (view && typeof view.load === 'function') view.load();
     });
     this.refreshYearDashboards();
+  }
+
+  refreshRestoredViewsAfterLayout() {
+    this.refreshRestoredViews().catch((error) => {
+      console.warn('Worklog: failed to refresh restored views after layout ready', error);
+    });
+  }
+
+  async refreshRestoredViews() {
+    await this.waitForLayoutPaint();
+    this.refreshOpenViews();
+    for (const delay of RESTORED_VIEW_STABILIZE_DELAYS) {
+      await this.wait(delay);
+      this.stabilizeOpenViews('restored-layout');
+    }
+  }
+
+  stabilizeOpenViews(reason = 'stabilize') {
+    [VIEW_TYPE, YEAR_VIEW_TYPE].forEach((type) => {
+      this.app.workspace.getLeavesOfType(type).forEach((leaf) => {
+        const view = leaf.view;
+        if (view && typeof view.ensureStableRender === 'function') view.ensureStableRender(reason);
+      });
+    });
   }
 
   reportYearFolder(year) {
@@ -1784,9 +1811,23 @@ class WorklogPlugin extends Plugin {
     await new Promise((resolve) => this.app.workspace.onLayoutReady(resolve));
   }
 
+  async wait(ms) {
+    const delay = Math.max(0, Number(ms) || 0);
+    await new Promise((resolve) => {
+      if (typeof window !== 'undefined' && typeof window.setTimeout === 'function') window.setTimeout(resolve, delay);
+      else setTimeout(resolve, delay);
+    });
+  }
+
   async waitForNextFrame() {
     if (typeof window === 'undefined' || typeof window.requestAnimationFrame !== 'function') return;
     await new Promise((resolve) => window.requestAnimationFrame(() => resolve()));
+  }
+
+  async waitForLayoutPaint(frames = 2) {
+    await this.waitForLayoutReady();
+    const count = Math.max(1, Number(frames) || 1);
+    for (let index = 0; index < count; index += 1) await this.waitForNextFrame();
   }
 
   existingLeaf(type, predicate = () => true) {
@@ -1795,10 +1836,10 @@ class WorklogPlugin extends Plugin {
   }
 
   async rerenderRevealedLeaf(leaf) {
-    await this.waitForNextFrame();
-    await this.waitForNextFrame();
+    await this.waitForLayoutPaint();
     const view = leaf && leaf.view;
-    if (view && view.data && typeof view.render === 'function') view.render();
+    if (view && typeof view.ensureStableRender === 'function') view.ensureStableRender('revealed');
+    else if (view && view.data && typeof view.render === 'function') view.render();
   }
 
   async openView(month = currentMonth()) {
@@ -1901,15 +1942,19 @@ class WorklogView extends ItemView {
   async load() {
     this.loadToken = (this.loadToken || 0) + 1;
     const token = this.loadToken;
+    if (!this.data) this.renderLoading();
+    await this.plugin.waitForLayoutPaint();
     const data = await this.plugin.readData(this.month);
     if (token !== this.loadToken) return;
     this.data = data;
     this.render();
+    this.ensureStableRender('month-load', token);
   }
 
   async save(next) {
     this.data = await this.plugin.writeData(next);
     this.render();
+    this.ensureStableRender('month-save');
     this.plugin.refreshMonthViews(this.data.month, this);
     this.plugin.refreshYearDashboards();
   }
@@ -1983,6 +2028,45 @@ class WorklogView extends ItemView {
       page.scrollTop += scrollDelta;
       if (page.scrollTop !== before) event.preventDefault();
     }, { passive: false });
+  }
+
+  renderLoading() {
+    if (!this.contentEl) return;
+    this.contentEl.empty();
+    const root = this.contentEl.createDiv({ cls: 'worklog-plugin-view' });
+    const main = this.el('main', 'worklog-main');
+    main.appendChild(this.el('div', 'worklog-empty', '工时工作台加载中...'));
+    root.appendChild(main);
+  }
+
+  ensureStableRender(reason = 'render', token = this.loadToken, attempt = 0) {
+    if (!this.data) return;
+    (async () => {
+      await this.plugin.waitForNextFrame();
+      if (token !== this.loadToken) return;
+      const issue = this.renderStabilityIssue();
+      if (!issue) return;
+      if (attempt === 0) console.warn(`Worklog: month view render not ready after ${reason} (${issue}), retrying`);
+      if (attempt >= STABLE_RENDER_RETRY_DELAYS.length) return;
+      await this.plugin.wait(STABLE_RENDER_RETRY_DELAYS[attempt]);
+      if (token !== this.loadToken) return;
+      this.render();
+      this.ensureStableRender(reason, token, attempt + 1);
+    })().catch((error) => {
+      console.warn('Worklog: failed to stabilize month view render', error);
+    });
+  }
+
+  renderStabilityIssue() {
+    if (!this.contentEl) return 'missing content';
+    if (this.contentEl.isConnected === false) return 'content detached';
+    const root = this.contentEl.querySelector('.worklog-plugin-view');
+    const main = this.contentEl.querySelector('.worklog-main');
+    if (!root || !main) return 'missing root';
+    if (!root.querySelector('.worklog-dashboard') || !root.querySelector('.worklog-month-grid') || !root.querySelector('.worklog-calendar')) return 'missing critical ui';
+    const rect = root.getBoundingClientRect ? root.getBoundingClientRect() : null;
+    if (rect && root.getClientRects && root.getClientRects().length > 0 && (rect.width <= 0 || rect.height <= 0)) return 'zero size';
+    return '';
   }
 
   render() {
@@ -2498,8 +2582,14 @@ class YearDashboardView extends ItemView {
   }
 
   async load() {
+    this.loadToken = (this.loadToken || 0) + 1;
+    const token = this.loadToken;
+    if (!this.data.length) this.renderLoading();
+    await this.plugin.waitForLayoutPaint();
     this.data = await this.plugin.readAllExistingData();
+    if (token !== this.loadToken) return;
     this.render();
+    this.ensureStableRender('year-load', token);
   }
 
   el(tag, className, text) {
@@ -2517,6 +2607,44 @@ class YearDashboardView extends ItemView {
 
   td(text, className = '') {
     return this.el('td', className, text);
+  }
+
+  renderLoading() {
+    if (!this.contentEl) return;
+    this.contentEl.empty();
+    const root = this.contentEl.createDiv({ cls: 'worklog-plugin-view worklog-year-view' });
+    const main = this.el('main', 'worklog-main');
+    main.appendChild(this.el('div', 'worklog-empty', '年度工时看板加载中...'));
+    root.appendChild(main);
+  }
+
+  ensureStableRender(reason = 'render', token = this.loadToken, attempt = 0) {
+    (async () => {
+      await this.plugin.waitForNextFrame();
+      if (token !== this.loadToken) return;
+      const issue = this.renderStabilityIssue();
+      if (!issue) return;
+      if (attempt === 0) console.warn(`Worklog: year view render not ready after ${reason} (${issue}), retrying`);
+      if (attempt >= STABLE_RENDER_RETRY_DELAYS.length) return;
+      await this.plugin.wait(STABLE_RENDER_RETRY_DELAYS[attempt]);
+      if (token !== this.loadToken) return;
+      this.render();
+      this.ensureStableRender(reason, token, attempt + 1);
+    })().catch((error) => {
+      console.warn('Worklog: failed to stabilize year view render', error);
+    });
+  }
+
+  renderStabilityIssue() {
+    if (!this.contentEl) return 'missing content';
+    if (this.contentEl.isConnected === false) return 'content detached';
+    const root = this.contentEl.querySelector('.worklog-plugin-view');
+    const main = this.contentEl.querySelector('.worklog-main');
+    if (!root || !main) return 'missing root';
+    if (!root.querySelector('.worklog-year-section') && !root.querySelector('.worklog-empty')) return 'missing critical ui';
+    const rect = root.getBoundingClientRect ? root.getBoundingClientRect() : null;
+    if (rect && root.getClientRects && root.getClientRects().length > 0 && (rect.width <= 0 || rect.height <= 0)) return 'zero size';
+    return '';
   }
 
   render() {
